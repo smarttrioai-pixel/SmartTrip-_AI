@@ -20,7 +20,17 @@ class Settings(BaseSettings):
     DEBUG: bool = Field(default=True)
 
     # --- CORS ---
-    ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    from pydantic import Field, field_validator
+
+# ... inside the Settings class ...
+ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+
+@field_validator("ALLOWED_ORIGINS", mode="before")
+@classmethod
+def _parse_allowed_origins(cls, value: object) -> object:
+    if isinstance(value, str) and not value.strip().startswith("["):
+        return [origin.strip() for origin in value.split(",") if origin.strip()]
+    return value
 
     # --- Firebase / Firestore (primary datastore) ---
     FIREBASE_PROJECT_ID: str = Field(..., description="GCP/Firebase project id")
