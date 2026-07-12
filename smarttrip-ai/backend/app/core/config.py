@@ -1,0 +1,42 @@
+"""
+Centralized application configuration.
+
+All environment-dependent values are read once here via pydantic-settings
+so the rest of the codebase never touches `os.environ` directly.
+"""
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    # --- App ---
+    APP_NAME: str = "SmartTrip AI 2.0"
+    ENVIRONMENT: str = Field(default="development")  # development | staging | production
+    API_V1_PREFIX: str = "/api/v1"
+    DEBUG: bool = Field(default=True)
+
+    # --- CORS ---
+    ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+
+    # --- Firebase / Firestore (primary datastore) ---
+    FIREBASE_PROJECT_ID: str = Field(..., description="GCP/Firebase project id")
+    # Path to a service account JSON file. Leave unset to use Application
+    # Default Credentials instead (recommended on Cloud Run/GCP).
+    FIREBASE_SERVICE_ACCOUNT_JSON: str | None = None
+
+    # --- Redis (optional, used for refresh-token/session revocation) ---
+    REDIS_URL: str | None = None
+
+    # --- Gemini ---
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-1.5-flash"
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Cached settings instance — import this, don't instantiate Settings() directly."""
+    return Settings()  # type: ignore[call-arg]  # values come from environment / .env
