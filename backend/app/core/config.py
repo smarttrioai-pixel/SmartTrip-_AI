@@ -15,30 +15,25 @@ class Settings(BaseSettings):
 
     # --- App ---
     APP_NAME: str = "SmartTrip AI 2.0"
-    ENVIRONMENT: str = Field(default="development")  # development | staging | production
+    ENVIRONMENT: str = Field(default="development")
     API_V1_PREFIX: str = "/api/v1"
     DEBUG: bool = Field(default=True)
 
     # --- CORS ---
-    from pydantic import Field, field_validator
+    ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
-# ... inside the Settings class ...
-ALLOWED_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+    @field_validator("ALLOWED_ORIGINS", mode="before")
+    @classmethod
+    def _parse_allowed_origins(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip().startswith("["):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
 
-@field_validator("ALLOWED_ORIGINS", mode="before")
-@classmethod
-def _parse_allowed_origins(cls, value: object) -> object:
-    if isinstance(value, str) and not value.strip().startswith("["):
-        return [origin.strip() for origin in value.split(",") if origin.strip()]
-    return value
-
-    # --- Firebase / Firestore (primary datastore) ---
+    # --- Firebase / Firestore ---
     FIREBASE_PROJECT_ID: str = Field(..., description="GCP/Firebase project id")
-    # Path to a service account JSON file. Leave unset to use Application
-    # Default Credentials instead (recommended on Cloud Run/GCP).
     FIREBASE_SERVICE_ACCOUNT_JSON: str | None = None
 
-    # --- Redis (optional, used for refresh-token/session revocation) ---
+    # --- Redis (optional) ---
     REDIS_URL: str | None = None
 
     # --- Gemini ---
@@ -49,4 +44,4 @@ def _parse_allowed_origins(cls, value: object) -> object:
 @lru_cache
 def get_settings() -> Settings:
     """Cached settings instance — import this, don't instantiate Settings() directly."""
-    return Settings()  # type: ignore[call-arg]  # values come from environment / .env
+    return Settings()  # type: ignore[call-arg]
