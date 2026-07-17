@@ -6,6 +6,7 @@ awaited like the rest of the async stack.
 """
 import asyncio
 from functools import lru_cache
+import json
 
 import firebase_admin
 from firebase_admin import auth as firebase_auth
@@ -27,12 +28,19 @@ def get_firebase_app() -> firebase_admin.App:
         return firebase_admin.get_app()
 
     if settings.FIREBASE_SERVICE_ACCOUNT_JSON:
-        cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_JSON)
-        return firebase_admin.initialize_app(cred, {"projectId": settings.FIREBASE_PROJECT_ID})
+    service_account = settings.FIREBASE_SERVICE_ACCOUNT_JSON.strip()
 
-    # Falls back to Application Default Credentials — works out of the box on
-    # Cloud Run / GCP, and locally after `gcloud auth application-default login`.
-    return firebase_admin.initialize_app(options={"projectId": settings.FIREBASE_PROJECT_ID})
+    # If the env var contains the JSON itself
+    if service_account.startswith("{"):
+        cred = credentials.Certificate(json.loads(service_account))
+    else:
+        # Otherwise assume it's a file path
+        cred = credentials.Certificate(service_account)
+
+    return firebase_admin.initialize_app(
+        cred,
+        {"projectId": settings.FIREBASE_PROJECT_ID},
+    )
 
 
 @lru_cache
