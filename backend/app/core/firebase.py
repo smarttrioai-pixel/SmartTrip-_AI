@@ -22,24 +22,30 @@ class InvalidFirebaseTokenError(Exception):
     """Raised when a Firebase ID token is missing, malformed, or expired."""
 
 
+
 @lru_cache
 def get_firebase_app() -> firebase_admin.App:
-    if firebase_admin._apps:  # already initialized (e.g. hot reload)
+    if firebase_admin._apps:
         return firebase_admin.get_app()
 
     if settings.FIREBASE_SERVICE_ACCOUNT_JSON:
-    service_account = settings.FIREBASE_SERVICE_ACCOUNT_JSON.strip()
+        service_account = settings.FIREBASE_SERVICE_ACCOUNT_JSON.strip()
 
-    # If the env var contains the JSON itself
-    if service_account.startswith("{"):
-        cred = credentials.Certificate(json.loads(service_account))
-    else:
-        # Otherwise assume it's a file path
-        cred = credentials.Certificate(service_account)
+        # Environment variable contains JSON
+        if service_account.startswith("{"):
+            cred = credentials.Certificate(json.loads(service_account))
+        else:
+            # Environment variable contains a file path
+            cred = credentials.Certificate(service_account)
 
+        return firebase_admin.initialize_app(
+            cred,
+            {"projectId": settings.FIREBASE_PROJECT_ID},
+        )
+
+    # Fallback to Application Default Credentials
     return firebase_admin.initialize_app(
-        cred,
-        {"projectId": settings.FIREBASE_PROJECT_ID},
+        options={"projectId": settings.FIREBASE_PROJECT_ID}
     )
 
 
