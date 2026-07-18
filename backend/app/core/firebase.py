@@ -21,19 +21,32 @@ class InvalidFirebaseTokenError(Exception):
     """Raised when a Firebase ID token is missing, malformed, or expired."""
 
 
+import json
+
 @lru_cache
 def get_firebase_app() -> firebase_admin.App:
-    if firebase_admin._apps:  # already initialized (e.g. hot reload)
+    if firebase_admin._apps:
         return firebase_admin.get_app()
 
     if settings.FIREBASE_SERVICE_ACCOUNT_JSON:
-        cred = credentials.Certificate(settings.FIREBASE_SERVICE_ACCOUNT_JSON)
-        return firebase_admin.initialize_app(cred, {"projectId": settings.FIREBASE_PROJECT_ID})
+        service_account = settings.FIREBASE_SERVICE_ACCOUNT_JSON.strip()
 
-    # Falls back to Application Default Credentials — works out of the box on
-    # Cloud Run / GCP, and locally after `gcloud auth application-default login`.
-    return firebase_admin.initialize_app(options={"projectId": settings.FIREBASE_PROJECT_ID})
+        # Environment variable contains JSON
+        if service_account.startswith("{"):
+            cred = credentials.Certificate(json.loads(service_account))
+        else:
+            # Environment variable contains a file path
+            cred = credentials.Certificate(service_account)
 
+        return firebase_admin.initialize_app(
+            cred,
+            {"projectId": settings.FIREBASE_PROJECT_ID},
+        )
+
+    # Fallback to Application Default Credentials
+    return firebase_admin.initialize_app(
+        options={"projectId": settings.FIREBASE_PROJECT_ID}
+    )
 
 @lru_cache
 def get_firestore_client():
