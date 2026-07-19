@@ -44,8 +44,13 @@ class Settings(BaseSettings):
     REDIS_URL: str | None = None
 
     # --- Gemini ---
-    GEMINI_API_KEY: str | None = None
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+GEMINI_API_KEY: str | None = None
+
+# Can be overridden from .env or Render Environment Variables
+GEMINI_MODEL: str = Field(
+    default="gemini-2.5-flash",
+    description="Gemini model name",
+)
 
 
 @lru_cache
