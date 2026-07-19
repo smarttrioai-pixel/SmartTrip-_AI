@@ -10,6 +10,10 @@ import json
 import google.generativeai as genai
 
 from app.core.config import get_settings
+import app.core.config as config_module
+
+print("CONFIG FILE:", config_module.__file__)
+print("SETTINGS FIELDS:", list(config_module.Settings.model_fields.keys()))
 
 settings = get_settings()
 _configured = False
