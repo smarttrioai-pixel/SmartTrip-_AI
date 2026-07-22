@@ -28,7 +28,12 @@ export function PreferencesForm({ profile }: { profile: Profile }) {
     formState: { isDirty },
   } = useForm<PreferencesFormValues>({
     resolver: zodResolver(preferencesSchema),
-    defaultValues: profile.preferences,
+    defaultValues: {
+  ...profile.preferences,
+  interests: profile.preferences?.interests ?? [],
+  accessibilityNeeds:
+    profile.preferences?.accessibilityNeeds ?? [],
+},
   });
 
   const onSubmit = (values: PreferencesFormValues) => updatePreferences.mutate(values);
