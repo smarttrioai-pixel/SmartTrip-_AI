@@ -9,9 +9,20 @@ export interface ChipGroupProps {
   onChange: (next: string[]) => void;
 }
 
-export function ChipGroup({ label, options, value, onChange }: ChipGroupProps) {
+export function ChipGroup({
+  label,
+  options,
+  value = [],
+  onChange,
+}: ChipGroupProps) {
   function toggle(option: string) {
-    onChange(value.includes(option) ? value.filter((v) => v !== option) : [...value, option]);
+   const selected = value ?? [];
+
+onChange(
+  selected.includes(option)
+    ? selected.filter((v) => v !== option)
+    : [...selected, option]
+);
   }
 
   return (
@@ -19,7 +30,7 @@ export function ChipGroup({ label, options, value, onChange }: ChipGroupProps) {
       <span className="text-sm font-medium text-ink-700 dark:text-ink-100">{label}</span>
       <div className="flex flex-wrap gap-2">
         {options.map((option) => {
-          const isSelected = value.includes(option);
+          const isSelected = (value ?? []).includes(option);
           return (
             <button
               key={option}
