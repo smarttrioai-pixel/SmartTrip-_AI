@@ -89,3 +89,5 @@ class User:
             created_at=data.get("created_at", datetime.now(timezone.utc)),
             updated_at=data.get("updated_at", datetime.now(timezone.utc)),
         )
+# Backward compatibility alias
+UserProfile = User
