@@ -1,0 +1,28 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /trips/{tripId} {
+      allow read, write: if request.auth != null && resource.data.user_id == request.auth.uid;
+      allow create: if request.auth != null;
+    }
+    match /memory_longterm/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /memory_behavioral/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+    match /chats/{chatId} {
+      allow read, write: if request.auth != null && resource.data.user_id == request.auth.uid;
+      allow create: if request.auth != null;
+    }
+    match /diaries/{diaryId} {
+      allow read, write: if request.auth != null;
+    }
+    match /analytics_logs/{logId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}
