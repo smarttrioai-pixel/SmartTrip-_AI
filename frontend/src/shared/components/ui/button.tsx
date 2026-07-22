@@ -11,10 +11,26 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        primary: "bg-brand-500 text-white hover:bg-brand-600 shadow-card",
-        outline: "border border-ink-100 bg-transparent hover:bg-ink-50 dark:border-ink-700 dark:hover:bg-ink-900",
-        ghost: "hover:bg-ink-50 dark:hover:bg-ink-900",
-      },
+  primary: "bg-brand-500 text-white hover:bg-brand-600 shadow-card",
+
+  secondary:
+    "bg-ink-100 text-ink-900 hover:bg-ink-200 dark:bg-ink-800 dark:text-white dark:hover:bg-ink-700",
+
+  outline:
+    "border border-ink-100 bg-transparent hover:bg-ink-50 dark:border-ink-700 dark:hover:bg-ink-900",
+
+  ghost:
+    "hover:bg-ink-50 dark:hover:bg-ink-900",
+
+  destructive:
+    "bg-red-600 text-white hover:bg-red-700",
+
+  success:
+    "bg-emerald-600 text-white hover:bg-emerald-700",
+
+  warning:
+    "bg-amber-500 text-white hover:bg-amber-600",
+},
       size: {
         default: "h-11 px-5",
         sm: "h-9 px-3 text-xs",
