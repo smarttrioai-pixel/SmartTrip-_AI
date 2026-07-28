@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.models.user import UserPreferences, UserProfile
+from app.models.user import User, UserPreferences
 from app.repositories.user_repository import UserRepository
 
 logger = logging.getLogger(__name__)
@@ -31,19 +31,15 @@ class UserProfileEngine:
     async def update_preferences(self, user_id: str, updates: dict[str, Any]) -> UserPreferences:
         """Update user preferences and invalidate cache."""
         user = await self._users.get_by_id(user_id)
-        if not user:
-            user = UserProfile(id=user_id, email=f"{user_id}@smarttrip.ai", preferences=UserPreferences())
-
-        current_prefs = user.preferences.dict()
+        current_prefs = user.preferences.to_dict() if user else UserPreferences().to_dict()
         current_prefs.update(updates)
         updated_prefs = UserPreferences(**current_prefs)
-        user.preferences = updated_prefs
 
-        await self._users.save(user)
+        await self._users.update_preferences(user_id, updated_prefs.to_dict())
         self._cache[user_id] = updated_prefs
         logger.info("Updated declared preferences for user %s", user_id)
         return updated_prefs
 
-    async def get_profile(self, user_id: str) -> UserProfile | None:
+    async def get_profile(self, user_id: str) -> User | None:
         """Fetch complete user profile model."""
         return await self._users.get_by_id(user_id)
