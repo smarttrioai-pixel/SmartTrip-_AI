@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     )
 
     GROQ_MODEL: str = Field(
-        default="qwen/qwen3-32b",
+        default="qwen/qwen3.6-27b",
         description="Groq model for text generation. Default: qwen/qwen3-32b.",
     )
 
