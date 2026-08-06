@@ -5,15 +5,16 @@ The single orchestration layer between the application (cognitive engines,
 routes, services) and the provider layer (GroqProvider).
 
 Responsibilities:
-  - Prompt construction
-  - JSON generation with validation and retry
-  - Retry with exponential backoff for transient failures (429, 503)
+  - JSON generation with single-call parse (no retry on parse failure)
+  - Retry with exponential backoff ONLY for genuine API failures (429, 503, timeout)
   - Circuit breaker to prevent cascading failures
   - Structured logging (provider, model, latency, tokens, retries, errors)
   - Streaming with automatic fallback
 
-Does NOT contain provider-specific logic. All provider calls go through
-BaseLLMProvider. The active provider is GroqProvider (Groq → qwen/qwen3-32b).
+JSON cleaning (think-tag removal, fence stripping, first-object extraction)
+is done inside GroqProvider.generate_json() before this layer ever sees the
+text. A JSONDecodeError here means the response was unrecoverable — no API
+retry is issued, because a second call would produce the same reasoning prefix.
 """
 from __future__ import annotations
 
@@ -148,12 +149,21 @@ class LLMService:
         """
         Generate a JSON object response.
 
-        Calls the provider's generate_json(), validates the response as
-        JSON, and retries once on a parse failure before raising.
+        Calls the provider's generate_json(), which performs ALL local
+        cleaning before returning (think-tag removal, fence stripping,
+        first-JSON-object extraction). This method then does a single
+        json.loads() on the cleaned string.
+
+        Retry policy:
+          - API failures (429, timeout, 503) → retried by _execute_with_retry
+            with exponential backoff.
+          - JSONDecodeError after cleaning → raised immediately as RuntimeError.
+            No second API call is issued: the model already returned its best
+            attempt; retrying would produce the same reasoning prefix.
 
         Raises:
-            RuntimeError: If the response is not valid JSON after retry,
-                          or on provider errors.
+            RuntimeError: On provider API errors, or if the cleaned response
+                          is not valid JSON.
         """
         if _circuit_breaker.is_open():
             raise RuntimeError(
@@ -161,59 +171,59 @@ class LLMService:
                 "Please try again later."
             )
 
-        attempt = 0
-        last_error: Exception | None = None
-        raw: str = ""
+        start = time.monotonic()
+        try:
+            cleaned = await self._execute_with_retry(
+                "generate_json",
+                self._provider.generate_json,
+                system_prompt,
+                user_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except RuntimeError:
+            raise  # API errors already logged and circuit-breaker handled
 
-        while attempt <= 1:  # original attempt + 1 parse-failure retry
-            start = time.monotonic()
-            try:
-                raw = await self._execute_with_retry(
-                    "generate_json",
-                    self._provider.generate_json,
-                    system_prompt,
-                    user_prompt,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-            except RuntimeError as exc:
-                raise  # propagate provider errors immediately
-
-            # Strip markdown fences if the model wrapped JSON in ```json ... ```
-            cleaned = _strip_json_fences(raw)
-
-            try:
-                result = json.loads(cleaned)
-                elapsed = time.monotonic() - start
-                logger.debug(
-                    "generate_json succeeded | provider=%s model=%s "
-                    "attempt=%d latency=%.3fs",
-                    self._provider.provider_name,
-                    self._provider.model_name,
-                    attempt + 1,
-                    elapsed,
-                )
-                _circuit_breaker.record_success()
-                return result
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                logger.warning(
-                    "generate_json parse failure (attempt %d/2) | "
-                    "provider=%s model=%s | raw_preview=%.120r",
-                    attempt + 1,
-                    self._provider.provider_name,
-                    self._provider.model_name,
-                    raw,
-                )
-                attempt += 1
-
-        _circuit_breaker.record_failure()
-        raise RuntimeError(
-            f"LLM did not return valid JSON after 2 attempts. "
-            f"Provider={self._provider.provider_name} model={self._provider.model_name}. "
-            f"Last parse error: {last_error}. "
-            f"Raw response preview: {raw[:200]!r}"
+        logger.debug(
+            "generate_json received from provider | provider=%s model=%s "
+            "cleaned_preview=%.200r",
+            self._provider.provider_name,
+            self._provider.model_name,
+            cleaned,
         )
+
+        try:
+            result = json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            elapsed = time.monotonic() - start
+            _circuit_breaker.record_failure()
+            logger.error(
+                "generate_json parse failure | provider=%s model=%s "
+                "latency=%.3fs error=%s cleaned_preview=%.200r",
+                self._provider.provider_name,
+                self._provider.model_name,
+                elapsed,
+                exc,
+                cleaned,
+            )
+            raise RuntimeError(
+                f"LLM returned unparseable JSON after local cleaning. "
+                f"Provider={self._provider.provider_name} "
+                f"model={self._provider.model_name}. "
+                f"Parse error: {exc}. "
+                f"Cleaned preview: {cleaned[:200]!r}"
+            ) from exc
+
+        elapsed = time.monotonic() - start
+        _circuit_breaker.record_success()
+        logger.debug(
+            "generate_json succeeded | provider=%s model=%s latency=%.3fs",
+            self._provider.provider_name,
+            self._provider.model_name,
+            elapsed,
+        )
+        return result
+
 
     async def summarize(
         self,
@@ -355,23 +365,6 @@ class LLMService:
 # ------------------------------------------------------------------
 # Module-level helpers
 # ------------------------------------------------------------------
-
-def _strip_json_fences(text: str) -> str:
-    """
-    Remove markdown code fences that some models wrap around JSON output.
-
-    Handles:  ```json\n{...}\n```  and  ```\n{...}\n```
-    """
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        # Remove first line (```json or ```) and last line (```)
-        inner_lines = lines[1:] if lines[0].startswith("```") else lines
-        if inner_lines and inner_lines[-1].strip() == "```":
-            inner_lines = inner_lines[:-1]
-        stripped = "\n".join(inner_lines).strip()
-    return stripped
-
 
 def _estimate_prompt_length(args: tuple) -> int:
     """Estimate total character length of all string arguments for logging."""
