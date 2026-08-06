@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import AsyncIterator
 
@@ -27,10 +28,17 @@ from app.services.providers.base import BaseLLMProvider
 logger = logging.getLogger(__name__)
 
 # JSON-mode instruction appended to system prompts for generate_json().
+# Explicit prohibition of reasoning output for models that emit <think> blocks.
 _JSON_INSTRUCTION = (
-    "\n\nIMPORTANT: Your response must be ONLY a valid JSON object. "
-    "Do NOT include any prose, markdown code fences, or explanation. "
-    "Return the raw JSON object and nothing else."
+    "\n\n"
+    "CRITICAL OUTPUT RULES:\n"
+    "- Return ONLY a single valid JSON object.\n"
+    "- Do NOT output <think> blocks, reasoning, or internal monologue.\n"
+    "- Do NOT wrap output in markdown code fences (``` or ```json).\n"
+    "- Do NOT include comments, prose, or any text before or after the JSON.\n"
+    "- The very first character of your response must be '{'.\n"
+    "- The very last character of your response must be '}'.\n"
+    "- Output exactly one JSON object and nothing else."
 )
 
 # Map Groq/OpenAI HTTP status codes to human-readable RuntimeError messages.
@@ -119,17 +127,131 @@ class GroqProvider(BaseLLMProvider):
         max_tokens: int = 4096,
     ) -> str:
         """
-        Generate a response expected to be pure JSON.
+        Generate a JSON response and return a clean, parseable JSON string.
 
-        Augments the system prompt with a JSON-only instruction.
-        The raw response string is returned; parsing and retry logic
-        are the responsibility of LLMService.generate_json().
+        Pipeline (all local — no extra API calls on cleaning failures):
+          1. Call Groq with response_format={"type": "json_object"} when supported.
+          2. Strip <think>...</think> reasoning blocks from the raw response.
+          3. Strip markdown code fences (```json / ```).
+          4. Regex-extract the first complete JSON object if surrounding text remains.
+          5. Log raw vs cleaned separately for debugging.
+          6. Return the cleaned string. Parsing and circuit-breaking are
+             the responsibility of LLMService.generate_json().
+
+        Raises:
+            RuntimeError: Only on genuine API failures (401/403/404/408/429/500/503).
+                          Never raises for reasoning-prefix or formatting issues —
+                          those are handled locally above.
         """
         json_system_prompt = system_prompt + _JSON_INSTRUCTION
         messages = _build_messages(json_system_prompt, [], user_prompt)
-        return await self._chat_complete(
-            messages, temperature=temperature, max_tokens=max_tokens
+        start = time.monotonic()
+
+        # Attempt 1: request JSON-object mode from the API (Groq supports this
+        # for most models; if not supported the API returns a 400 which we catch).
+        try:
+            response = await self._client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except APIStatusError as exc:
+            if exc.status_code == 400:
+                # response_format not supported for this model — fall back to
+                # plain text completion with local cleaning below.
+                logger.debug(
+                    "generate_json: response_format=json_object not supported "
+                    "for model=%s (400), falling back to plain completion.",
+                    self._model,
+                )
+                response = None
+            else:
+                elapsed = time.monotonic() - start
+                raise self._normalize_status_error(exc, elapsed) from exc
+        except APITimeoutError as exc:
+            elapsed = time.monotonic() - start
+            logger.error(
+                "generate_json timed out | model=%s latency=%.3fs",
+                self._model, elapsed,
+            )
+            raise RuntimeError(
+                f"Groq request timed out for model={self._model}"
+            ) from exc
+        except APIConnectionError as exc:
+            elapsed = time.monotonic() - start
+            logger.error(
+                "generate_json connection failed | model=%s latency=%.3fs error=%s",
+                self._model, elapsed, exc,
+            )
+            raise RuntimeError(
+                f"Groq connection failed for model={self._model}: {exc}"
+            ) from exc
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            logger.error(
+                "generate_json unexpected error | model=%s latency=%.3fs error=%s",
+                self._model, elapsed, exc,
+            )
+            raise RuntimeError(
+                f"Groq request failed for model={self._model}: {exc}"
+            ) from exc
+
+        # Fall back to plain completion if json_object mode was rejected.
+        if response is None:
+            response = await self._chat_complete(
+                messages, temperature=temperature, max_tokens=max_tokens,
+                _return_response=True,
+            )
+
+        elapsed = time.monotonic() - start
+
+        # Extract raw text from response object.
+        try:
+            raw = response.choices[0].message.content or ""
+        except (AttributeError, IndexError, KeyError) as exc:
+            raise RuntimeError(
+                f"Groq returned an unexpected response structure for model={self._model}"
+            ) from exc
+
+        if not raw.strip():
+            raise RuntimeError(
+                f"Groq returned an empty response for model={self._model}"
+            )
+
+        # Log usage and raw preview.
+        usage = response.usage
+        if usage:
+            logger.info(
+                "generate_json raw | model=%s latency=%.3fs "
+                "prompt_tokens=%d completion_tokens=%d total_tokens=%d "
+                "raw_preview=%.120r",
+                self._model, elapsed,
+                usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
+                raw,
+            )
+        else:
+            logger.info(
+                "generate_json raw | model=%s latency=%.3fs raw_preview=%.120r",
+                self._model, elapsed, raw,
+            )
+
+        # ------------------------------------------------------------------
+        # Local cleaning pipeline — no API calls, no retries.
+        # ------------------------------------------------------------------
+        cleaned = _strip_think_tags(raw)   # remove <think>...</think> blocks
+        cleaned = _strip_fences(cleaned)   # remove ``` / ```json wrappers
+        cleaned = _extract_first_json(cleaned)  # pull first {...} object
+
+        logger.debug(
+            "generate_json cleaned | model=%s cleaned_preview=%.200r",
+            self._model, cleaned,
         )
+
+        return cleaned
 
     async def summarize(
         self,
@@ -204,12 +326,15 @@ class GroqProvider(BaseLLMProvider):
         *,
         temperature: float,
         max_tokens: int,
+        _return_response: bool = False,
     ) -> str:
         """
-        Execute a chat completion request against the Groq API.
+        Execute a plain chat completion request against the Groq API.
 
         Normalizes all openai SDK errors to RuntimeError.
         Logs latency, model, and token usage on success.
+        When _return_response=True, returns the raw response object
+        (used by generate_json fallback path only).
         """
         start = time.monotonic()
         try:
@@ -284,6 +409,8 @@ class GroqProvider(BaseLLMProvider):
                 self._model, elapsed,
             )
 
+        if _return_response:
+            return response  # type: ignore[return-value]
         return text.strip()
 
     def _normalize_status_error(
@@ -327,3 +454,83 @@ def _build_messages(
             messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": user_prompt})
     return messages
+
+
+def _strip_think_tags(text: str) -> str:
+    """
+    Remove all <think>...</think> reasoning blocks emitted by Qwen3 and
+    similar chain-of-thought models.
+
+    Handles:
+      - Multi-line think blocks
+      - Multiple consecutive think blocks
+      - Partial/unclosed think tags (removes from <think> to end-of-string)
+    """
+    # Remove complete <think>...</think> blocks (non-greedy, DOTALL).
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove any unclosed <think> block that runs to end of string.
+    cleaned = re.sub(r"<think>.*$", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _strip_fences(text: str) -> str:
+    """
+    Remove markdown code fences that some models wrap around JSON output.
+
+    Handles:
+      - ```json\n{...}\n```
+      - ```\n{...}\n```
+      - ``` {...} ``` (inline)
+    """
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        # Drop the opening fence line (e.g. ```json or ```).
+        inner = lines[1:] if lines[0].startswith("```") else lines
+        # Drop the closing fence line if present.
+        if inner and inner[-1].strip() == "```":
+            inner = inner[:-1]
+        stripped = "\n".join(inner).strip()
+    return stripped
+
+
+def _extract_first_json(text: str) -> str:
+    """
+    Extract the first complete JSON object {...} from text.
+
+    Used as a last-resort safety net when the model emits surrounding
+    prose despite explicit instructions. Walks the string character by
+    character tracking brace depth to find the balanced outer object.
+
+    Returns the original text unchanged if no object boundary is found,
+    so LLMService.generate_json() can produce a meaningful parse error.
+    """
+    start_idx = text.find("{")
+    if start_idx == -1:
+        return text  # no JSON object found; let upstream handle the error
+
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, ch in enumerate(text[start_idx:], start=start_idx):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start_idx : i + 1]
+
+    # Unbalanced braces — return from the first { to end and let upstream handle it.
+    return text[start_idx:]
