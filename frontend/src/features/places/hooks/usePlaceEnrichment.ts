@@ -6,14 +6,28 @@ import type { EnrichPlaceInput } from "@/features/places/domain/types";
 
 /**
  * Batches enrichment for every activity across a trip's days into one
- * request. Keyed by destination + the exact set of activity titles, so it
- * naturally refetches if the underlying trip data changes.
+ * request. The query key changes whenever the destination or place inputs
+ * change, allowing React Query to cache and refetch real place data safely.
  */
-export function useEnrichedPlaces(destination: string, places: EnrichPlaceInput[]) {
+export function useEnrichedPlaces(
+  destination: string,
+  places: EnrichPlaceInput[],
+) {
   return useQuery({
-    queryKey: [\n      "places",\n      "enrich",\n      destination,\n      places.map((p) => [p.title, p.locationHint, p.category, p.mealType, p.foodQuery]),\n    ],
+    queryKey: [
+      "places",
+      "enrich",
+      destination,
+      places.map((p) => [
+        p.title,
+        p.locationHint,
+        p.category,
+        p.mealType,
+        p.foodQuery,
+      ]),
+    ],
     queryFn: () => placesApi.enrichPlaces(destination, places),
     enabled: places.length > 0,
-    staleTime: 30 * 60 * 1000, // real place data (image/rating/address) doesn't change minute to minute
+    staleTime: 30 * 60 * 1000,
   });
 }
