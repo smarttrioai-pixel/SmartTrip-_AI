@@ -153,6 +153,51 @@ class Settings(BaseSettings):
         description="HTTP timeout in seconds for Geoapify API requests",
     )
 
+    # ------------------------------------------------------------------
+    # Google Places API (New)  — PRIMARY place discovery / enrichment
+    # Uses places.googleapis.com/v1/places:searchNearby and :searchText.
+    # Requires "Places API (New)" enabled in Google Cloud Console.
+    # Geoapify is used as fallback when Google is unavailable or returns
+    # insufficient results.
+    # NEVER expose this key to frontend code or logs.
+    # ------------------------------------------------------------------
+    GOOGLE_PLACES_API_KEY: str | None = Field(
+        default=None,
+        description=(
+            "Google Places API (New) key. Required for primary place discovery. "
+            "If unset, the system falls back to Geoapify automatically."
+        ),
+    )
+
+    GOOGLE_PLACES_BASE_URL: str = Field(
+        default="https://places.googleapis.com/v1",
+        description="Google Places API (New) base URL",
+    )
+
+    GOOGLE_PLACES_TIMEOUT_SECONDS: int = Field(
+        default=10,
+        description="HTTP timeout in seconds for Google Places API requests",
+    )
+
+    # ------------------------------------------------------------------
+    # Place provider selection
+    # ------------------------------------------------------------------
+    PLACE_PROVIDER: str = Field(
+        default="google",
+        description=(
+            "Primary place provider: 'google' (default) | 'geoapify'. "
+            "Set to 'geoapify' to skip Google and use only Geoapify."
+        ),
+    )
+
+    ENABLE_GEOAPIFY_FALLBACK: bool = Field(
+        default=True,
+        description=(
+            "When True, Geoapify is used as fallback if Google Places fails "
+            "or returns 0 results. Set False to disable Geoapify entirely."
+        ),
+    )
+
 
 @lru_cache
 def get_settings() -> Settings:

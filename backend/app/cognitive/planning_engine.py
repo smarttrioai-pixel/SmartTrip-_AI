@@ -65,6 +65,7 @@ from app.cognitive.explainability_engine import ExplainabilityEngine
 from app.cognitive.live_context import CognitiveContext, CognitiveDecision, LiveContext
 from app.cognitive.live_context_engine import LiveContextEngine
 from app.cognitive.memory_engine import MemoryEngine
+from app.cognitive.place_consistency import PlaceConsistencyValidator, get_place_consistency_validator
 from app.cognitive.recommendation_engine import RecommendationEngine
 from app.cognitive.risk_assessment_engine import RiskAssessmentEngine
 from app.cognitive.user_profile_engine import UserProfileEngine
@@ -102,6 +103,7 @@ class PlanningEngine:
         llm_service: LLMService,
         context_builder: ContextBuilder,
         live_context_engine: LiveContextEngine | None = None,
+        place_consistency_validator: PlaceConsistencyValidator | None = None,
     ) -> None:
         self._profiles = user_profile_engine
         self._memory = memory_engine
@@ -114,6 +116,9 @@ class PlanningEngine:
         self._llm = llm_service
         self._context_builder = context_builder
         self._live_context_engine = live_context_engine
+        self._consistency_validator = (
+            place_consistency_validator or get_place_consistency_validator()
+        )
 
     async def generate_plan(self, user_id: str, request: GenerateItineraryRequest) -> RawPlan:
         num_days = (request.end_date - request.start_date).days + 1
@@ -240,9 +245,26 @@ class PlanningEngine:
         days = normalize_days(days, effective_transport)
 
         # ----------------------------------------------------------------
-        # Stage 7: Place Enrichment (Geoapify)
+        # Stage 7: Place Enrichment (Google Primary → Geoapify Fallback)
         # ----------------------------------------------------------------
         used_place_ids: set[str] = set()
+
+        # Stats for cognitive trace
+        _provider_stats: dict[str, int] = {
+            "google": 0, "geoapify": 0, "none": 0,
+            "attractions_found": 0, "restaurants_found": 0,
+            "verified": 0, "rejected": 0,
+        }
+        _rejection_reasons: list[dict] = []
+
+        # User preferences from memory (for TouristRanker)
+        user_prefs: list[str] = []
+        if memory_context and memory_context.relevant_preferences:
+            user_prefs = [
+                p.value if hasattr(p, "value") else str(p)
+                for p in memory_context.relevant_preferences[:10]
+            ]
+        user_prefs += list(preferences.interests or [])
 
         for day in days:
             for activity in day.get("activities", []):
@@ -257,24 +279,45 @@ class PlanningEngine:
                 if not (is_meal or is_attraction):
                     continue
 
+                # Read new Qwen intent fields (with fallback to old title field)
+                slot_intent = (
+                    str(activity.get("slot_intent") or "")
+                    or str(activity.get("title") or "")
+                )
+                place_query = (
+                    str(activity.get("place_query") or "")
+                    or food_query
+                    or slot_intent
+                )
+                place_type_hint = activity.get("place_type_hint")
+
+                # Use slot_intent as the display title until enrichment provides a real name
+                if not activity.get("title") and slot_intent:
+                    activity["title"] = slot_intent
+
                 try:
                     enriched = await self._place_enrichment.enrich_place(
-                        title=str(activity.get("title") or "Meal" if is_meal else activity.get("title") or ""),
+                        title=slot_intent,
                         location_hint=str(activity.get("location") or ""),
                         destination=request.destination,
+                        slot_intent=slot_intent,
+                        place_query=place_query,
+                        place_type_hint=place_type_hint,
                         category="meal" if is_meal else category,
                         meal_type=meal_type,
                         food_query=food_query,
                         used_place_ids=used_place_ids,
+                        user_preferences=user_prefs,
                     )
                 except Exception as exc:
                     logger.warning(
                         "Place enrichment failed for %r in %r: %s",
-                        activity.get("title"), request.destination, exc,
+                        slot_intent, request.destination, exc,
                     )
                     enriched = None
 
                 if enriched and enriched.get("matched_place_name"):
+                    # --- Set title from verified Google/Geoapify place name ---
                     if is_meal:
                         label = str(meal_type).title() if meal_type else ""
                         activity["title"] = (
@@ -287,11 +330,47 @@ class PlanningEngine:
                     activity["location"] = enriched.get("address") or enriched["matched_place_name"]
                     activity["place_enrichment"] = enriched
 
-                    if enriched.get("source_id"):
-                        used_place_ids.add(enriched["source_id"])
+                    # --- Place/Activity Consistency Validation ---
+                    place_types = enriched.get("place_types") or []
+                    if place_types and not is_meal:
+                        self._consistency_validator.validate_and_fix(
+                            activity,
+                            place_name=enriched["matched_place_name"],
+                            place_types=place_types,
+                            destination=request.destination,
+                            rating=enriched.get("rating"),
+                            address=enriched.get("address"),
+                        )
+
+                    # Update dedup set
+                    source_id = enriched.get("source_id") or enriched.get("place_id")
+                    if source_id:
+                        used_place_ids.add(source_id)
+
+                    # Stats
+                    provider = enriched.get("provider_used", enriched.get("source", "unknown"))
+                    if "google" in provider:
+                        _provider_stats["google"] += 1
+                    elif "geoapify" in provider:
+                        _provider_stats["geoapify"] += 1
+                    if is_meal:
+                        _provider_stats["restaurants_found"] += 1
+                    else:
+                        _provider_stats["attractions_found"] += 1
+                    _provider_stats["verified"] += 1
 
                 elif is_attraction and enriched is None:
-                    activity["place_enrichment"] = {"found": False, "source": "geoapify"}
+                    activity["place_enrichment"] = {
+                        "found": False,
+                        "source": "google",
+                        "reason": "no_tourist_relevant_candidate",
+                    }
+                    _provider_stats["rejected"] += 1
+                    _rejection_reasons.append({
+                        "slot_intent": slot_intent,
+                        "decision": "reject",
+                        "reason": "PLACE_NOT_VERIFIED_no_tourist_candidate",
+                    })
 
         # ----------------------------------------------------------------
         # Stage 8: Opening-Hours Validation (post-Geoapify, SCIF Pass 2)
@@ -351,6 +430,40 @@ class PlanningEngine:
         # ----------------------------------------------------------------
         if cognitive_ctx is not None and live_context is not None:
             cognitive_ctx.decisions = all_decisions
+
+        # Attach Google Places provider stats to cognitive_ctx for trace
+        _google_trace = {
+            "place_provider": (
+                "google" if _provider_stats["google"] > 0
+                else ("geoapify" if _provider_stats["geoapify"] > 0 else "none")
+            ),
+            "candidate_stats": {
+                "attractions_found": _provider_stats["attractions_found"],
+                "restaurants_found": _provider_stats["restaurants_found"],
+                "verified": _provider_stats["verified"],
+                "rejected": _provider_stats["rejected"],
+                "google_results": _provider_stats["google"],
+                "geoapify_results": _provider_stats["geoapify"],
+            },
+            "rejected_slots": _rejection_reasons[:10],  # cap for trace size
+        }
+        if cognitive_ctx is not None:
+            cognitive_ctx.provider_trace = _google_trace
+        else:
+            # Minimal cognitive context when no live context was built
+            from app.cognitive.live_context import LiveContext as _LC
+            cognitive_ctx = CognitiveContext(
+                current_request={
+                    "destination": request.destination,
+                    "budget": request.budget,
+                },
+                memory_items=0,
+                memory_summary="",
+                live_context=_LC(),
+                constraints=[],
+                decisions=all_decisions,
+                provider_trace=_google_trace,
+            )
 
         est_cost = ai_result.get("estimated_total_cost", request.budget)
 

@@ -27,6 +27,9 @@ from app.services.llm_service import LLMService
 from app.services.providers.groq_provider import GroqProvider
 from app.services.place_enrichment_service import PlaceEnrichmentService, get_place_enrichment_service
 from app.integrations.geoapify_provider import GeoapifyProvider, get_geoapify_provider
+from app.integrations.google_places_provider import GooglePlacesProvider, get_google_places_provider
+from app.cognitive.tourist_ranker import TouristRanker, get_tourist_ranker
+from app.cognitive.place_consistency import PlaceConsistencyValidator, get_place_consistency_validator
 from app.cognitive.live_context_engine import LiveContextEngine, get_live_context_engine
 from app.services.trip_service import TripPlannerService
 
@@ -149,11 +152,35 @@ def get_adaptive_learning_engine(
     return AdaptiveLearningEngine(memory_engine)
 
 
+def get_google_places_provider_dep() -> GooglePlacesProvider:
+    """Return GooglePlacesProvider singleton."""
+    return get_google_places_provider()
+
+
+def get_tourist_ranker_dep() -> TouristRanker:
+    """Return TouristRanker singleton."""
+    return get_tourist_ranker()
+
+
+def get_place_consistency_validator_dep() -> PlaceConsistencyValidator:
+    """Return PlaceConsistencyValidator singleton."""
+    return get_place_consistency_validator()
+
+
 def get_place_enrichment_engine(
     navigation_service: Annotated[NavigationService, Depends(get_navigation_service)],
     geoapify_provider: Annotated[GeoapifyProvider, Depends(get_geoapify_provider)],
+    google_places_provider: Annotated[GooglePlacesProvider, Depends(get_google_places_provider_dep)],
+    tourist_ranker: Annotated[TouristRanker, Depends(get_tourist_ranker_dep)],
+    place_consistency_validator: Annotated[PlaceConsistencyValidator, Depends(get_place_consistency_validator_dep)],
 ) -> PlaceEnrichmentService:
-    return get_place_enrichment_service(navigation_service, geoapify_provider)
+    return get_place_enrichment_service(
+        navigation_service,
+        geoapify_provider,
+        google_places_provider=google_places_provider,
+        tourist_ranker=tourist_ranker,
+        place_consistency_validator=place_consistency_validator,
+    )
 
 
 def get_planning_engine(

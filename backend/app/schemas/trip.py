@@ -39,6 +39,18 @@ class Activity(BaseModel):
     place_enrichment: dict | None = None
     scif_rejected: bool | None = None
     scif_rejection_reason: str | None = None
+    # Google Places fields (optional, backward-compatible)
+    place_id: str | None = None              # Google place_id
+    rating: float | None = None              # 0–5 Google rating
+    user_ratings_total: int | None = None    # Google review count
+    place_types: list[str] | None = None     # Google types list
+    verified: bool | None = None             # Verified by places provider
+    place_provider: str | None = None        # "google" | "geoapify"
+    # Slot intent from Qwen (before enrichment overwrites title)
+    slot_intent: str | None = None
+    # Description correction metadata
+    description_corrected: bool | None = None
+
 
 
 class DayPlanResponse(BaseModel):

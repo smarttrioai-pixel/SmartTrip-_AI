@@ -234,6 +234,10 @@ class CognitiveContext:
     # E. SCIF decisions
     decisions: list[CognitiveDecision] = field(default_factory=list)
 
+    # F. Place provider trace (Google Places / Geoapify stats)
+    # Set by PlanningEngine after Stage 7 enrichment completes.
+    provider_trace: dict[str, Any] = field(default_factory=dict)
+
     def to_trace_dict(self) -> dict[str, Any]:
         """Returns a non-sensitive summary for debug/logging."""
         return {
@@ -243,4 +247,8 @@ class CognitiveContext:
             "live_context": self.live_context.to_summary_dict(),
             "constraints_count": len(self.constraints),
             "scif_decisions": [d.to_dict() for d in self.decisions],
+            # Google Places provider stats
+            "place_provider": self.provider_trace.get("place_provider", "unknown"),
+            "candidate_stats": self.provider_trace.get("candidate_stats", {}),
+            "rejected_slots": self.provider_trace.get("rejected_slots", []),
         }

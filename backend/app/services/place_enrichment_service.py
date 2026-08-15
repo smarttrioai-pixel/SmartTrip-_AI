@@ -1,174 +1,220 @@
 """
 Place Enrichment Service for SmartTrip AI.
 
-Architecture:
-    LLM (Qwen via Groq)           — proposes activity/meal intent
+Architecture (updated):
+    LLM (Qwen via Groq)           — outputs PLANNING INTENT (slot_intent, place_query)
          ↓
     PlaceEnrichmentService         — this file
-         ↓
-    GeoapifyProvider               — app/integrations/geoapify_provider.py
-         ↓
-    Geoapify Places API            — real place discovery and verification
-         ↓
-    Validated itinerary            — only verified places reach the frontend
+         ├─ PRIMARY: GooglePlacesProvider
+         │       ↓
+         │   TouristRanker          — tourist relevance scoring
+         │       ↓
+         │   PlaceConsistencyValidator — description mismatch detection
+         │
+         └─ FALLBACK: GeoapifyProvider (if Google fails or returns 0 results)
+                       and ENABLE_GEOAPIFY_FALLBACK=true
 
 Principles enforced here:
-- The LLM NEVER fabricates a restaurant name, attraction name, coordinate,
-  rating, image URL, address, or opening hours.
-- Geoapify is the source of truth for real geographic places.
-- Attraction names proposed by the LLM are validated against Geoapify search
-  results. If no sufficiently strong match is found, the activity is marked
-  as unresolved (returns None) and removed from the itinerary.
-- Meal slots are resolved to REAL restaurants found by Geoapify. The LLM
-  provides food intent / cuisine; Geoapify provides the actual restaurant.
-- Duplicate restaurants across breakfast / lunch / dinner are prevented via
-  a used_place_ids set maintained by the caller (PlanningEngine).
+- Qwen NEVER produces final place names. It produces planning INTENT.
+- Google Places is the source of truth for real geographic places.
+- Tourist relevance ranking ensures a juice shop never beats a temple.
+- Generic businesses are rejected from attraction slots.
+- Duplicate places are prevented via place_id tracking (not string matching).
+- If both providers fail → return None → activity removed from itinerary.
+- No fabrication under any circumstances.
 """
 from __future__ import annotations
 
 import logging
-from difflib import SequenceMatcher
 from typing import Any
 
+from app.cognitive.place_consistency import PlaceConsistencyValidator, get_place_consistency_validator
+from app.cognitive.tourist_ranker import TouristRanker, MIN_TOURIST_RELEVANCE, get_tourist_ranker
+from app.core.config import get_settings
 from app.integrations.geoapify_provider import GeoapifyProvider, get_geoapify_provider, CATEGORY_MAP
+from app.integrations.google_places_provider import GooglePlacesProvider, get_google_places_provider
 from app.integrations.navigation_service import NavigationService, get_navigation_service
+from app.integrations.place_provider import PlaceCandidate
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Matching thresholds
+# Search configuration
 # ---------------------------------------------------------------------------
-
-# Minimum composite score for an attraction to be accepted as a valid match.
-# Below this threshold the attraction is considered unverified and is removed.
-MIN_ATTRACTION_MATCH_SCORE = 0.30
-
-# Penalty applied to a place's score when it has already been used in the
-# current itinerary (e.g. same restaurant for breakfast and lunch).
-DUPLICATE_PENALTY = 0.40
-
-# Default search radii
-ATTRACTION_RADIUS_M = 5_000
+ATTRACTION_RADIUS_M = 8_000   # Wider radius for attractions
 MEAL_RADIUS_M = 5_000
 
+# Minimum attraction results from Google before triggering Geoapify fallback
+_MIN_GOOGLE_ATTRACTION_CANDIDATES = 2
+_MIN_GOOGLE_RESTAURANT_CANDIDATES = 2
 
 # ---------------------------------------------------------------------------
-# Scoring helpers
+# Category → attraction search queries
+# Used to build multiple targeted Google queries per slot intent
 # ---------------------------------------------------------------------------
+_CATEGORY_QUERIES: dict[str, list[str]] = {
+    "attraction": [
+        "tourist attractions",
+        "historical landmarks",
+        "famous places",
+    ],
+    "culture": [
+        "museums cultural sites",
+        "art galleries",
+        "cultural centers",
+    ],
+    "nature": [
+        "parks nature reserves",
+        "gardens viewpoints",
+        "scenic spots",
+    ],
+    "museum": [
+        "museums",
+        "heritage sites exhibitions",
+    ],
+    "sights": [
+        "tourist attractions landmarks",
+        "historical monuments",
+    ],
+    "religious": [
+        "temples shrines",
+        "mosques churches",
+        "religious sites",
+    ],
+    "shopping": [
+        "markets bazaars",
+        "local shopping areas",
+    ],
+}
 
-def _name_similarity(a: str, b: str) -> float:
-    """SequenceMatcher-based name similarity in [0, 1]."""
-    return SequenceMatcher(None, a.lower().strip(), b.lower().strip()).ratio()
+
+def _build_attraction_query(slot_intent: str, category: str, destination: str) -> str:
+    """Build a targeted Google Places search query for an attraction slot."""
+    # Use slot_intent if it contains useful terms
+    if slot_intent and len(slot_intent) > 5:
+        return f"{slot_intent} in {destination}"
+
+    # Category-based generic query
+    base_queries = _CATEGORY_QUERIES.get(category.lower(), ["tourist attractions"])
+    return f"{base_queries[0]} in {destination}"
 
 
-def _category_match(candidate_categories: list[str], requested_concept: str) -> float:
-    """1.0 if any candidate category overlaps with the requested concept mapping."""
-    expected = set(CATEGORY_MAP.get(requested_concept.lower(), []))
-    if not expected:
-        return 0.5  # unknown concept — neutral
-    for cat in candidate_categories:
-        for exp in expected:
-            if exp.startswith(cat) or cat.startswith(exp):
-                return 1.0
-    return 0.0
-
-
-def _distance_score(distance_m: float, radius_m: int) -> float:
-    """Linear distance score: 1.0 at centre, 0.0 at radius boundary."""
-    if radius_m <= 0:
-        return 0.5
-    return max(0.0, 1.0 - (distance_m / radius_m))
-
-
-def _query_relevance(candidate_name: str, query: str | None) -> float:
-    """Similarity between candidate name and the food/query intent string."""
-    if not query or not candidate_name:
-        return 0.0
-    return SequenceMatcher(None, candidate_name.lower(), query.lower()).ratio()
-
-
-def _score_candidate(
-    candidate: dict[str, Any],
+def _candidate_to_enrichment(
+    candidate: PlaceCandidate,
     *,
-    requested_name: str,
-    requested_concept: str,
-    radius_m: int,
-    food_query: str | None = None,
-    used_place_ids: set[str] | None = None,
-) -> float:
-    """
-    Composite candidate score.
+    is_meal: bool,
+) -> dict[str, Any]:
+    """Convert a PlaceCandidate to the enrichment result dict used by PlanningEngine."""
+    # Humanize the primary type
+    category_label: str | None = None
+    if candidate.types:
+        t = candidate.types[0]
+        category_label = t.replace("_", " ").title()
+    if not category_label:
+        category_label = "Restaurant" if is_meal else None
 
-        score = 0.50 * name_similarity
-              + 0.20 * category_match
-              + 0.20 * distance_score
-              + 0.10 * query_relevance
-              - DUPLICATE_PENALTY  (if place_id in used_place_ids)
+    return {
+        "matched_place_name": candidate.name,
+        "place_id": candidate.place_id,
+        "image_url": None,
+        "rating": candidate.rating,
+        "rating_scale": 5.0 if candidate.rating is not None else None,
+        "user_ratings_total": candidate.user_ratings_total,
+        "price_level": candidate.price_level,
+        "category": category_label,
+        "place_types": candidate.types,
+        "address": candidate.address,
+        "lat": candidate.lat,
+        "lon": candidate.lon,
+        "opening_hours": candidate.opening_hours,
+        "opening_hours_note": (
+            None if candidate.opening_hours else "Not available from provider."
+        ),
+        "business_status": candidate.business_status,
+        "estimated_ticket_price": None,
+        "estimated_ticket_price_note": "Not available from provider.",
+        "wikipedia_summary": None,
+        "tourist_relevance": round(candidate.tourist_relevance, 3),
+        "source": candidate.source,
+        "source_id": candidate.place_id,
+        "verified": True,
+    }
 
-    Returns a float in [-0.4, 1.0].
-    """
-    name_sim = _name_similarity(candidate.get("name", ""), requested_name)
-    cat_score = _category_match(candidate.get("categories", []), requested_concept)
-    dist_score = _distance_score(float(candidate.get("distance_m", 0)), radius_m)
-    query_score = _query_relevance(candidate.get("name", ""), food_query)
-
-    score = (
-        0.50 * name_sim
-        + 0.20 * cat_score
-        + 0.20 * dist_score
-        + 0.10 * query_score
-    )
-
-    if used_place_ids and candidate.get("place_id") in used_place_ids:
-        score -= DUPLICATE_PENALTY
-
-    return score
-
-
-# ---------------------------------------------------------------------------
-# PlaceEnrichmentService
-# ---------------------------------------------------------------------------
 
 class PlaceEnrichmentService:
     """
     Provider-agnostic orchestrator for place discovery and validation.
 
-    Responsibilities:
-        1. Resolve destination coordinates (via NavigationService / Nominatim).
-        2. Search candidate places via GeoapifyProvider.
-        3. Score and rank candidates.
-        4. Validate attraction candidates against the LLM-proposed name.
-        5. Return verified place metadata; return None for unverified places.
+    Primary flow:
+        1. Resolve destination coordinates.
+        2. Google Places (primary).
+        3. TouristRanker — score candidates.
+        4. PlaceConsistencyValidator — validate activity/place match.
+        5. Return verified place metadata.
+
+    Fallback:
+        If Google returns 0 candidates or is unavailable →
+        GeoapifyProvider (if ENABLE_GEOAPIFY_FALLBACK=true).
+
+    Returns None when no verified place is found — never fabricates.
     """
 
     def __init__(
         self,
         navigation_service: NavigationService,
         geoapify_provider: GeoapifyProvider,
+        google_places_provider: GooglePlacesProvider,
+        tourist_ranker: TouristRanker,
+        place_consistency_validator: PlaceConsistencyValidator,
     ) -> None:
         self._navigation = navigation_service
         self._geoapify = geoapify_provider
+        self._google = google_places_provider
+        self._ranker = tourist_ranker
+        self._validator = place_consistency_validator
+        self._settings = get_settings()
 
-    async def _resolve_destination_coords(
-        self,
-        destination: str,
-    ) -> dict[str, Any] | None:
-        """
-        Geocode the destination city/region (not a food query or POI name).
+    @property
+    def _google_enabled(self) -> bool:
+        return (
+            self._settings.PLACE_PROVIDER == "google"
+            and bool(self._settings.GOOGLE_PLACES_API_KEY)
+        )
 
-        Step 1: Try Geoapify geocoding.
-        Step 2: Fall back to NavigationService (Nominatim) if Geoapify unavailable.
-        Returns None if both fail.
+    @property
+    def _geoapify_fallback_enabled(self) -> bool:
+        return self._settings.ENABLE_GEOAPIFY_FALLBACK and bool(self._settings.GEOAPIFY_API_KEY)
+
+    async def _resolve_destination_coords(self, destination: str) -> dict[str, Any] | None:
         """
-        # Try Geoapify first (preferred — consistent data source)
-        geo = await self._geoapify.geocode(destination)
-        if geo:
-            return geo
+        Geocode destination. Tries Google first, then Geoapify, then Nominatim.
+        Returns None if all fail.
+        """
+        # Try Google geocoding
+        if self._google_enabled:
+            try:
+                geo = await self._google.geocode(destination)
+                if geo:
+                    return {"lat": geo.lat, "lon": geo.lon}
+            except Exception as e:
+                logger.warning("Google geocode failed for %r: %s", destination, e)
+
+        # Try Geoapify geocoding
+        if self._settings.GEOAPIFY_API_KEY:
+            try:
+                geo = await self._geoapify.geocode(destination)
+                if geo:
+                    return {"lat": geo["lat"], "lon": geo["lon"]}
+            except Exception as e:
+                logger.warning("Geoapify geocode failed for %r: %s", destination, e)
 
         # Fallback to Nominatim (NavigationService)
-        nav_geo = await self._navigation.geocode(destination)
-        if nav_geo:
-            return {"lat": nav_geo["lat"], "lon": nav_geo["lon"]}
+        try:
+            nav_geo = await self._navigation.geocode(destination)
+            if nav_geo:
+                return {"lat": nav_geo["lat"], "lon": nav_geo["lon"]}
+        except Exception as e:
+            logger.warning("Nominatim geocode failed for %r: %s", destination, e)
 
         return None
 
@@ -178,31 +224,31 @@ class PlaceEnrichmentService:
         location_hint: str,
         destination: str,
         *,
+        slot_intent: str | None = None,
+        place_query: str | None = None,
+        place_type_hint: str | None = None,
         category: str | None = None,
         meal_type: str | None = None,
         food_query: str | None = None,
         used_place_ids: set[str] | None = None,
+        user_preferences: list[str] | None = None,
     ) -> dict[str, Any] | None:
         """
-        Resolve an LLM-generated activity title to a verified real place.
+        Resolve a planning intent to a verified real place.
 
-        For meals:
-            - Geocode the DESTINATION (not the food query).
-            - Search Geoapify for real restaurants/cafes near the destination.
-            - Rank by score; penalize duplicates.
-            - Return the best real restaurant (any restaurant is acceptable —
-              the LLM provides intent; Geoapify provides the actual place).
-
-        For attractions:
-            - Geocode the destination.
-            - Search Geoapify for nearby sights matching the category.
-            - Score candidates against the LLM-proposed name.
-            - If best score < MIN_ATTRACTION_MATCH_SCORE → return None
-              (the place cannot be verified and will be removed).
+        Args:
+            title:          Qwen-generated slot title (kept as fallback hint only).
+            slot_intent:    Qwen planning intent string (preferred).
+            place_query:    Targeted search query from Qwen.
+            place_type_hint: Qwen-suggested Google type hint.
+            category:       Activity category (meal|attraction|culture|nature|museum...).
+            meal_type:      breakfast|lunch|dinner (for meal slots).
+            food_query:     Food/cuisine search query from Qwen.
+            used_place_ids: Set of already-used place IDs (deduplication).
+            user_preferences: User memory preferences for ranking.
 
         Returns:
-            A dict of verified place metadata, or None if unresolved.
-            The caller must treat None as "remove this activity".
+            Verified enrichment dict or None.
         """
         is_meal = (
             (category or "").lower() == "meal"
@@ -210,9 +256,7 @@ class PlaceEnrichmentService:
             or bool(food_query)
         )
 
-        # ----------------------------------------------------------------
-        # Step 1: Resolve destination coordinates
-        # ----------------------------------------------------------------
+        # Resolve destination coordinates
         geo = await self._resolve_destination_coords(destination)
         if geo is None:
             logger.warning(
@@ -224,15 +268,19 @@ class PlaceEnrichmentService:
         dest_lat: float = geo["lat"]
         dest_lon: float = geo["lon"]
 
+        effective_intent = slot_intent or title or ""
+        effective_query = place_query or food_query or effective_intent
+        effective_category = category or ("meal" if is_meal else "attraction")
+
         if is_meal:
             return await self._enrich_meal(
-                title=title,
                 destination=destination,
                 dest_lat=dest_lat,
                 dest_lon=dest_lon,
                 meal_type=meal_type,
-                food_query=food_query,
+                food_query=food_query or effective_query,
                 used_place_ids=used_place_ids,
+                user_preferences=user_preferences,
             )
         else:
             return await self._enrich_attraction(
@@ -240,85 +288,16 @@ class PlaceEnrichmentService:
                 destination=destination,
                 dest_lat=dest_lat,
                 dest_lon=dest_lon,
-                category=category,
+                slot_intent=effective_intent,
+                place_query=effective_query,
+                category=effective_category,
                 used_place_ids=used_place_ids,
+                user_preferences=user_preferences,
             )
 
-    async def _enrich_meal(
-        self,
-        *,
-        title: str,
-        destination: str,
-        dest_lat: float,
-        dest_lon: float,
-        meal_type: str | None,
-        food_query: str | None,
-        used_place_ids: set[str] | None,
-    ) -> dict[str, Any] | None:
-        """
-        Find a REAL restaurant near the destination for this meal slot.
-
-        The LLM's food_query guides the search intent; Geoapify returns
-        actual restaurant records. The LLM-proposed title (e.g. "Local
-        Restaurant") is NOT used as the final place name — only Geoapify
-        names are returned.
-        """
-        categories = CATEGORY_MAP["meal"]  # catering.restaurant + cafe + fast_food
-
-        # Use food_query as a name hint to Geoapify (best-effort text filter)
-        name_hint = food_query or None
-
-        candidates = await self._geoapify.search_places(
-            latitude=dest_lat,
-            longitude=dest_lon,
-            categories=categories,
-            radius_meters=MEAL_RADIUS_M,
-            name_filter=name_hint,
-            limit=20,
-        )
-
-        if not candidates:
-            # Try broader search without name filter
-            candidates = await self._geoapify.search_places(
-                latitude=dest_lat,
-                longitude=dest_lon,
-                categories=categories,
-                radius_meters=MEAL_RADIUS_M,
-                limit=20,
-            )
-
-        if not candidates:
-            logger.info(
-                "place_enrichment destination=%r meal=%r no_candidates_found",
-                destination, meal_type,
-            )
-            return None
-
-        # Score candidates; penalize duplicates
-        scored = [
-            (
-                _score_candidate(
-                    c,
-                    requested_name=food_query or meal_type or title,
-                    requested_concept="restaurant",
-                    radius_m=MEAL_RADIUS_M,
-                    food_query=food_query,
-                    used_place_ids=used_place_ids,
-                ),
-                c,
-            )
-            for c in candidates
-        ]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best = scored[0]
-
-        logger.info(
-            "place_enrichment destination=%r meal=%r matched_place=%r "
-            "match_score=%.2f verified=true",
-            destination, meal_type, best.get("name"), best_score,
-        )
-
-        return self._build_result(best, is_meal=True)
+    # ------------------------------------------------------------------
+    # Attraction enrichment
+    # ------------------------------------------------------------------
 
     async def _enrich_attraction(
         self,
@@ -327,109 +306,243 @@ class PlaceEnrichmentService:
         destination: str,
         dest_lat: float,
         dest_lon: float,
-        category: str | None,
+        slot_intent: str,
+        place_query: str,
+        category: str,
         used_place_ids: set[str] | None,
+        user_preferences: list[str] | None,
     ) -> dict[str, Any] | None:
-        """
-        Validate an LLM-proposed attraction against real Geoapify data.
+        """Find a real tourist attraction via Google (primary) or Geoapify (fallback)."""
 
-        If the best candidate's score is below MIN_ATTRACTION_MATCH_SCORE,
-        returns None — the attraction is considered fabricated and removed.
+        candidates: list[PlaceCandidate] = []
+        provider_used = "none"
 
-        Example:
-            LLM proposes "Guntur War Memorial"
-            Geoapify finds no matching sights near Guntur
-            → score below threshold → return None → activity removed
-        """
-        concept = category or "attraction"
-        categories = GeoapifyProvider.categories_for_concept(concept)
+        # --- Google PRIMARY ---
+        if self._google_enabled:
+            query = _build_attraction_query(slot_intent, category, destination)
+            try:
+                raw = await self._google.search_attractions(
+                    lat=dest_lat,
+                    lon=dest_lon,
+                    query=query,
+                    radius_m=ATTRACTION_RADIUS_M,
+                    limit=25,
+                )
+                if raw:
+                    candidates = raw
+                    provider_used = "google"
+                    logger.info(
+                        "place_enrichment provider=google operation=attraction "
+                        "destination=%r query=%r candidates=%d",
+                        destination, query, len(candidates),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Google attraction search failed for %r: %s", destination, exc
+                )
 
-        candidates = await self._geoapify.search_places(
-            latitude=dest_lat,
-            longitude=dest_lon,
-            categories=categories,
-            radius_meters=ATTRACTION_RADIUS_M,
-            limit=20,
-        )
+        # --- Geoapify FALLBACK ---
+        if len(candidates) < _MIN_GOOGLE_ATTRACTION_CANDIDATES and self._geoapify_fallback_enabled:
+            try:
+                concept = category or "attraction"
+                geo_categories = GeoapifyProvider.categories_for_concept(concept)
+                geo_results = await self._geoapify.search_places(
+                    latitude=dest_lat,
+                    longitude=dest_lon,
+                    categories=geo_categories,
+                    radius_meters=ATTRACTION_RADIUS_M,
+                    limit=20,
+                )
+                if geo_results:
+                    # Convert Geoapify results to PlaceCandidate
+                    geo_candidates = [
+                        PlaceCandidate(
+                            place_id=r.get("place_id") or r.get("source_id") or "",
+                            name=r.get("name") or "",
+                            lat=r.get("lat", dest_lat),
+                            lon=r.get("lon", dest_lon),
+                            address=r.get("address"),
+                            rating=None,
+                            user_ratings_total=None,
+                            types=[c.split(".")[-1] for c in r.get("categories", [])],
+                            opening_hours=r.get("opening_hours"),
+                            distance_m=float(r.get("distance_m", 0)),
+                            source="geoapify",
+                        )
+                        for r in geo_results if r.get("name")
+                    ]
+                    candidates = candidates + geo_candidates
+                    provider_used = "geoapify" if not candidates else "google+geoapify"
+                    logger.info(
+                        "place_enrichment provider=geoapify_fallback operation=attraction "
+                        "destination=%r candidates=%d",
+                        destination, len(geo_candidates),
+                    )
+            except Exception as exc:
+                logger.warning("Geoapify fallback failed for %r: %s", destination, exc)
 
         if not candidates:
             logger.info(
-                "place_enrichment destination=%r attraction=%r no_candidates_found verified=false",
-                destination, title,
+                "place_enrichment destination=%r attraction=%r no_candidates provider=%s",
+                destination, title, provider_used,
             )
             return None
 
-        # Score all candidates against the LLM-proposed name
-        scored = [
-            (
-                _score_candidate(
-                    c,
-                    requested_name=title,
-                    requested_concept=concept,
-                    radius_m=ATTRACTION_RADIUS_M,
-                    used_place_ids=used_place_ids,
-                ),
-                c,
-            )
-            for c in candidates
-        ]
-        scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best = scored[0]
-
-        logger.info(
-            "place_enrichment destination=%r requested_place=%r matched_place=%r "
-            "match_score=%.2f verified=%s",
-            destination, title, best.get("name"), best_score,
-            "true" if best_score >= MIN_ATTRACTION_MATCH_SCORE else "false",
+        # --- Tourist Ranking ---
+        ranked = self._ranker.score_candidates(
+            candidates,
+            slot_intent=slot_intent,
+            user_preferences=user_preferences or [],
+            radius_m=ATTRACTION_RADIUS_M,
+            used_place_ids=used_place_ids,
         )
 
-        if best_score < MIN_ATTRACTION_MATCH_SCORE:
-            # The LLM-generated attraction name could not be verified.
-            # Do NOT fabricate a fallback — return None to have the caller
-            # remove this activity from the itinerary.
+        # --- Apply minimum tourist relevance threshold ---
+        passing = [c for c in ranked if c.tourist_relevance >= MIN_TOURIST_RELEVANCE]
+
+        if not passing:
+            logger.info(
+                "place_enrichment destination=%r attraction=%r "
+                "all_candidates_below_threshold=%.2f top_score=%.2f "
+                "top_name=%r top_types=%s",
+                destination, title, MIN_TOURIST_RELEVANCE,
+                ranked[0].tourist_relevance if ranked else 0.0,
+                ranked[0].name if ranked else "none",
+                ranked[0].types[:3] if ranked else [],
+            )
+            return None  # Quality > quantity — no fabrication
+
+        best = passing[0]
+
+        # --- Place validity check for this slot ---
+        if not self._validator.is_valid_attraction(best.types, category):
+            logger.info(
+                "PLACE_VALIDATION place=%r types=%s category=%s decision=reject "
+                "reason=wrong_category_for_slot",
+                best.name, best.types[:3], category,
+            )
+            # Try next candidate
+            for alt in passing[1:]:
+                if self._validator.is_valid_attraction(alt.types, category):
+                    best = alt
+                    break
+            else:
+                return None
+
+        logger.info(
+            "place_enrichment destination=%r attraction=%r "
+            "matched_place=%r score=%.2f types=%s provider=%s",
+            destination, title, best.name, best.tourist_relevance,
+            best.types[:3], best.source,
+        )
+
+        result = _candidate_to_enrichment(best, is_meal=False)
+        result["provider_used"] = best.source
+        return result
+
+    # ------------------------------------------------------------------
+    # Meal enrichment
+    # ------------------------------------------------------------------
+
+    async def _enrich_meal(
+        self,
+        *,
+        destination: str,
+        dest_lat: float,
+        dest_lon: float,
+        meal_type: str | None,
+        food_query: str,
+        used_place_ids: set[str] | None,
+        user_preferences: list[str] | None,
+    ) -> dict[str, Any] | None:
+        """Find a REAL restaurant for a meal slot."""
+
+        candidates: list[PlaceCandidate] = []
+        provider_used = "none"
+
+        # Combine food_query with destination context
+        effective_query = food_query or f"restaurant {destination}"
+        if destination.lower() not in effective_query.lower():
+            effective_query = f"{effective_query} {destination}"
+
+        # --- Google PRIMARY ---
+        if self._google_enabled:
+            try:
+                raw = await self._google.search_restaurants(
+                    lat=dest_lat,
+                    lon=dest_lon,
+                    food_query=effective_query,
+                    meal_type=meal_type,
+                    radius_m=MEAL_RADIUS_M,
+                    limit=20,
+                )
+                if raw:
+                    candidates = raw
+                    provider_used = "google"
+            except Exception as exc:
+                logger.warning("Google restaurant search failed for %r: %s", destination, exc)
+
+        # --- Geoapify FALLBACK ---
+        if len(candidates) < _MIN_GOOGLE_RESTAURANT_CANDIDATES and self._geoapify_fallback_enabled:
+            try:
+                geo_categories = CATEGORY_MAP["meal"]
+                geo_results = await self._geoapify.search_places(
+                    latitude=dest_lat,
+                    longitude=dest_lon,
+                    categories=geo_categories,
+                    radius_meters=MEAL_RADIUS_M,
+                    limit=20,
+                )
+                if geo_results:
+                    geo_candidates = [
+                        PlaceCandidate(
+                            place_id=r.get("place_id") or r.get("source_id") or "",
+                            name=r.get("name") or "",
+                            lat=r.get("lat", dest_lat),
+                            lon=r.get("lon", dest_lon),
+                            address=r.get("address"),
+                            rating=None,
+                            types=["restaurant"],
+                            opening_hours=r.get("opening_hours"),
+                            distance_m=float(r.get("distance_m", 0)),
+                            source="geoapify",
+                        )
+                        for r in geo_results if r.get("name")
+                    ]
+                    candidates = candidates + geo_candidates
+                    provider_used = "geoapify" if not candidates else "google+geoapify"
+            except Exception as exc:
+                logger.warning("Geoapify meal fallback failed for %r: %s", destination, exc)
+
+        if not candidates:
+            logger.info(
+                "place_enrichment destination=%r meal=%r no_candidates",
+                destination, meal_type,
+            )
             return None
 
-        return self._build_result(best, is_meal=False)
+        # --- Restaurant Ranking ---
+        ranked = self._ranker.score_restaurant_candidates(
+            candidates,
+            food_query=food_query or "",
+            meal_type=meal_type,
+            user_preferences=user_preferences or [],
+            radius_m=MEAL_RADIUS_M,
+            used_place_ids=used_place_ids,
+        )
 
-    @staticmethod
-    def _build_result(place: dict[str, Any], *, is_meal: bool) -> dict[str, Any]:
-        """
-        Build the standardised enrichment result dict from a Geoapify place record.
+        best = ranked[0]
 
-        All fields come directly from Geoapify — nothing is fabricated.
-        Fields not available from the provider are set to None.
-        """
-        categories = place.get("categories", [])
-        category_label: str | None = None
-        if categories:
-            # Humanise the first category token
-            raw = categories[0] if isinstance(categories, list) else str(categories)
-            category_label = raw.split(".")[-1].replace("_", " ").title()
-        if not category_label:
-            category_label = "Restaurant" if is_meal else None
+        logger.info(
+            "place_enrichment destination=%r meal=%r matched_place=%r "
+            "score=%.2f rating=%s provider=%s",
+            destination, meal_type, best.name, best.tourist_relevance,
+            best.rating, best.source,
+        )
 
-        return {
-            "matched_place_name": place.get("name"),
-            "image_url": place.get("image_url"),        # None on Geoapify free tier
-            "rating": place.get("rating"),               # None on Geoapify free tier
-            "rating_scale": None,                        # no rating → no scale
-            "reviews_count": None,
-            "reviews_count_note": "Not available from Geoapify.",
-            "category": category_label,
-            "address": place.get("address"),
-            "opening_hours": place.get("opening_hours"),
-            "opening_hours_note": (
-                None if place.get("opening_hours") else "Not available from Geoapify."
-            ),
-            "estimated_ticket_price": None,
-            "estimated_ticket_price_note": "Not available from Geoapify.",
-            "lat": place.get("lat"),
-            "lon": place.get("lon"),
-            "wikipedia_summary": None,
-            # Source provenance — used for debugging and deduplication
-            "source": "geoapify",
-            "source_id": place.get("source_id") or place.get("place_id"),
-        }
+        result = _candidate_to_enrichment(best, is_meal=True)
+        result["provider_used"] = best.source
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -442,10 +555,17 @@ _place_enrichment_service: PlaceEnrichmentService | None = None
 def get_place_enrichment_service(
     navigation_service: NavigationService,
     geoapify_provider: GeoapifyProvider,
+    google_places_provider: GooglePlacesProvider | None = None,
+    tourist_ranker: TouristRanker | None = None,
+    place_consistency_validator: PlaceConsistencyValidator | None = None,
 ) -> PlaceEnrichmentService:
     global _place_enrichment_service
     if _place_enrichment_service is None:
         _place_enrichment_service = PlaceEnrichmentService(
-            navigation_service, geoapify_provider
+            navigation_service=navigation_service,
+            geoapify_provider=geoapify_provider,
+            google_places_provider=google_places_provider or get_google_places_provider(),
+            tourist_ranker=tourist_ranker or get_tourist_ranker(),
+            place_consistency_validator=place_consistency_validator or get_place_consistency_validator(),
         )
     return _place_enrichment_service
