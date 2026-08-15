@@ -1,0 +1,124 @@
+"""
+Context Engine for SmartTrip AI (SCIF Framework).
+Evaluates real-time contextual conditions: Weather, Traffic/Transport, Crowd density,
+Opening hours, Festival detection, Emergency & Safety alerts.
+Computes Context Score, Context Confidence, and Recommendation Impact Score.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from typing import Any
+
+from app.integrations.weather_service import WeatherService, get_weather_service
+from app.integrations.navigation_service import NavigationService, get_navigation_service
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ContextScoreBreakdown:
+    opening_hours_score: float
+    weather_score: float
+    traffic_score: float
+    crowd_score: float
+    safety_score: float
+    festival_bonus: float = 0.0
+    context_confidence: float = 0.90
+    recommendation_impact_score: float = 0.85
+    unavailable_components: list[str] = field(default_factory=list)
+
+    @property
+    def composite(self) -> float:
+        base = (
+            self.opening_hours_score * 0.25
+            + self.weather_score * 0.25
+            + self.traffic_score * 0.15
+            + self.crowd_score * 0.15
+            + self.safety_score * 0.20
+        )
+        return min(1.0, round(base + self.festival_bonus, 2))
+
+class ContextEngine:
+    def __init__(
+        self,
+        weather_service: WeatherService | None = None,
+        navigation_service: NavigationService | None = None,
+    ) -> None:
+        self._weather = weather_service or get_weather_service()
+        self._navigation = navigation_service or get_navigation_service()
+
+    async def evaluate_context(
+        self, activity: dict, lat: float | None = None, lon: float | None = None
+    ) -> ContextScoreBreakdown:
+        """
+        Evaluate real-time context metrics for an activity.
+
+        lat/lon are the geocoded destination coordinates — required for a
+        real weather lookup. Previously defaulted to Paris (48.8566, 2.3522)
+        when not supplied, meaning any caller that forgot to geocode the
+        actual destination silently got Paris's weather. Now: if
+        coordinates aren't available, weather is honestly marked
+        unavailable rather than defaulting to a real city's data.
+        """
+        unavailable: list[str] = []
+
+        if lat is not None and lon is not None:
+            weather_data = await self._weather.get_forecast(lat, lon)
+            weather_score = weather_data.get("suitability_score", 0.5)
+        else:
+            weather_score = 0.5
+            unavailable.append("weather")
+
+        opening_hours_score = self._score_opening_hours(activity)
+
+        # No real traffic/crowd/safety data source is integrated yet (no
+        # traffic API, no crowd-density API, no safety-incident API exists
+        # in this codebase). Reporting a neutral 0.5 and flagging these as
+        # unavailable is honest; the previous fixed 0.88/0.75/0.92 looked
+        # like real measurements but were not computed from anything.
+        traffic_score = 0.5
+        crowd_score = 0.5
+        safety_score = 0.5
+        unavailable.extend(["traffic", "crowd", "safety"])
+
+        title_desc = f"{activity.get('title', '')} {activity.get('description', '')}".lower()
+        festival_bonus = 0.10 if any(k in title_desc for k in ["festival", "carnival", "parade", "cultural night"]) else 0.0
+
+        context_confidence = round((weather_score + opening_hours_score + safety_score) / 3, 2)
+        recommendation_impact = round(0.4 * weather_score + 0.3 * opening_hours_score + 0.3 * safety_score, 2)
+
+        return ContextScoreBreakdown(
+            opening_hours_score=opening_hours_score,
+            weather_score=weather_score,
+            traffic_score=traffic_score,
+            crowd_score=crowd_score,
+            safety_score=safety_score,
+            festival_bonus=festival_bonus,
+            context_confidence=context_confidence,
+            recommendation_impact_score=recommendation_impact,
+            unavailable_components=unavailable,
+        )
+
+    def _score_opening_hours(self, activity: dict) -> float:
+        time_str = activity.get("time", "")
+        hour = self._parse_hour(time_str)
+        if hour is None:
+            return 0.75
+        if 8 <= hour <= 21:
+            return 0.95
+        if 6 <= hour <= 23:
+            return 0.70
+        return 0.40
+
+    @staticmethod
+    def _parse_hour(time_str: str) -> int | None:
+        try:
+            digits = "".join(c for c in time_str.split(":")[0] if c.isdigit())
+            hour = int(digits)
+        except (ValueError, IndexError):
+            return None
+        if "PM" in time_str.upper() and hour != 12:
+            hour += 12
+        if "AM" in time_str.upper() and hour == 12:
+            hour = 0
+        return hour if 0 <= hour <= 23 else None
