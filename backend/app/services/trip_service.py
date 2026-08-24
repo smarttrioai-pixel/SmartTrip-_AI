@@ -9,10 +9,16 @@ DTO shaping - all planning/scoring/explaining logic lives in app/cognitive/.
 """
 from __future__ import annotations
 
+import logging
+
+from pydantic import ValidationError
+
 from app.cognitive.adaptive_learning_engine import AdaptiveLearningEngine
 from app.cognitive.planning_engine import PlanningEngine
 from app.repositories.trip_repository import TripRepository
 from app.schemas.trip import GenerateItineraryRequest, TripResponse
+
+logger = logging.getLogger(__name__)
 
 
 class TripPlannerService:
@@ -27,7 +33,21 @@ class TripPlannerService:
         self._adaptive_learning = adaptive_learning_engine
 
     async def generate_itinerary(self, user_id: str, request: GenerateItineraryRequest) -> TripResponse:
+        logger.info(
+            "TRIP_GENERATE_START user_id=%s destination=%r days=%d budget=%.0f",
+            user_id, request.destination,
+            (request.end_date - request.start_date).days + 1,
+            request.budget,
+        )
+
         plan = await self._planning.generate_plan(user_id, request)
+
+        logger.info(
+            "TRIP_GENERATE_PLAN_OK destination=%r days=%d activities_total=%d",
+            request.destination,
+            len(plan.days),
+            sum(len(d.get("activities", [])) for d in plan.days),
+        )
 
         trip = await self._trips.create(
             {
@@ -48,19 +68,48 @@ class TripPlannerService:
         if plan.cognitive_context is not None:
             cognitive_trace = plan.cognitive_context.to_trace_dict()
 
-        return TripResponse(
-            id=trip.id,
-            destination=trip.destination,
-            start_date=trip.start_date,
-            end_date=trip.end_date,
-            budget=trip.budget,
-            currency=trip.currency,
-            travel_style=trip.travel_style,
-            days=trip.days,
-            estimated_total_cost=trip.estimated_total_cost,
-            is_saved=trip.is_saved,
-            cognitive_trace=cognitive_trace,
-        )
+        try:
+            return TripResponse(
+                id=trip.id,
+                destination=trip.destination,
+                start_date=trip.start_date,
+                end_date=trip.end_date,
+                budget=trip.budget,
+                currency=trip.currency,
+                travel_style=trip.travel_style,
+                days=trip.days,
+                estimated_total_cost=trip.estimated_total_cost,
+                is_saved=trip.is_saved,
+                cognitive_trace=cognitive_trace,
+            )
+        except ValidationError as exc:
+            # Log the exact activity structures that failed validation so we
+            # can diagnose schema drift without guessing. This should never
+            # happen after the normalization fix but is a safety net.
+            logger.error(
+                "TRIP_RESPONSE_VALIDATION_FAILED destination=%r errors=%d "
+                "detail=%s",
+                request.destination, exc.error_count(), exc.json(indent=2),
+            )
+            # Surface each day's activities for debugging
+            for day_idx, day in enumerate(plan.days):
+                for act_idx, act in enumerate(day.get("activities", [])):
+                    missing = [
+                        f for f in ("title", "description", "location")
+                        if not act.get(f)
+                    ]
+                    if missing:
+                        logger.error(
+                            "MISSING_FIELDS day=%d activity=%d missing=%s "
+                            "keys_present=%s",
+                            day_idx, act_idx, missing, list(act.keys()),
+                        )
+            raise RuntimeError(
+                f"Itinerary response failed schema validation for "
+                f"'{request.destination}': {exc.error_count()} errors. "
+                f"Check server logs for detail."
+            ) from exc
+
 
 
     async def list_trips(self, user_id: str, *, saved_only: bool = False) -> list[TripResponse]:

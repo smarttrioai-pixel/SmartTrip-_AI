@@ -79,6 +79,68 @@ from app.services.place_enrichment_service import PlaceEnrichmentService
 logger = logging.getLogger(__name__)
 
 
+def _normalize_pre_enrichment(activity: dict, destination: str) -> None:
+    """
+    Map Qwen's new intent-schema fields onto the required Activity schema
+    fields (title, description, location).
+
+    Qwen's new schema outputs:
+        slot_intent    → maps to  title      (if title missing)
+        reason         → maps to  description (if description missing)
+        place_query    → maps to  location    (if location missing)
+
+    Qwen's old schema outputs title/description/location directly.
+    Both schemas are supported simultaneously.
+
+    This function is called on every activity BEFORE enrichment so that:
+    - Non-enriched activities (transport, other) always have all fields.
+    - Enriched activities have valid fallbacks before overwriting.
+    - The Activity Pydantic model never sees a missing required field.
+
+    Rules:
+    - title:       slot_intent → title → place_query → category fallback
+    - description: reason → slot_intent summary → category fallback
+    - location:    existing location → destination (never empty)
+    """
+    # ---- title ----
+    if not activity.get("title"):
+        title_candidate = (
+            str(activity.get("slot_intent") or "")
+            or str(activity.get("place_query") or "")
+            or str(activity.get("category") or "Activity").replace("_", " ").title()
+        )
+        activity["title"] = title_candidate.strip() or "Activity"
+        logger.debug(
+            "activity_normalize title_from_intent title=%r slot_intent=%r",
+            activity["title"], activity.get("slot_intent"),
+        )
+
+    # ---- description ----
+    if not activity.get("description"):
+        description_candidate = (
+            str(activity.get("reason") or "")
+            or str(activity.get("slot_intent") or "")
+            or str(activity.get("title") or "")
+        )
+        activity["description"] = description_candidate.strip() or "Part of your itinerary."
+        logger.debug(
+            "activity_normalize description_from_reason description=%r reason=%r",
+            activity["description"][:60], activity.get("reason"),
+        )
+
+    # ---- location ----
+    if not activity.get("location"):
+        location_candidate = (
+            str(activity.get("place_query") or "")
+            or destination
+        )
+        activity["location"] = location_candidate.strip() or destination
+        logger.debug(
+            "activity_normalize location_from_destination location=%r",
+            activity["location"],
+        )
+
+
 @dataclass
 class RawPlan:
     days: list[dict]
@@ -245,6 +307,18 @@ class PlanningEngine:
         days = normalize_days(days, effective_transport)
 
         # ----------------------------------------------------------------
+        # Stage 6b: Qwen intent → Activity schema normalization
+        # Map new Qwen intent fields (slot_intent, reason, place_query)
+        # onto the required Activity schema fields (title, description,
+        # location) so that every activity has valid values BEFORE Stage 7
+        # enrichment tries to overwrite them.
+        # This handles non-enriched activities (transport, other) as well.
+        # ----------------------------------------------------------------
+        for day in days:
+            for activity in day.get("activities", []):
+                _normalize_pre_enrichment(activity, request.destination)
+
+        # ----------------------------------------------------------------
         # Stage 7: Place Enrichment (Google Primary → Geoapify Fallback)
         # ----------------------------------------------------------------
         used_place_ids: set[str] = set()
@@ -330,6 +404,17 @@ class PlanningEngine:
                     activity["location"] = enriched.get("address") or enriched["matched_place_name"]
                     activity["place_enrichment"] = enriched
 
+                    # description: keep Qwen reason if exists, else build from enrichment
+                    if not activity.get("description") or activity.get("description") == activity.get("slot_intent"):
+                        category_label = (
+                            enriched.get("category") or ""
+                        ).replace("_", " ").title()
+                        activity["description"] = (
+                            activity.get("reason")
+                            or f"{category_label} in {request.destination}.".strip()
+                            or f"Visit {enriched['matched_place_name']} in {request.destination}."
+                        )
+
                     # --- Place/Activity Consistency Validation ---
                     place_types = enriched.get("place_types") or []
                     if place_types and not is_meal:
@@ -371,6 +456,25 @@ class PlanningEngine:
                         "decision": "reject",
                         "reason": "PLACE_NOT_VERIFIED_no_tourist_candidate",
                     })
+
+        # ----------------------------------------------------------------
+        # Stage 7b: Post-enrichment Activity schema validation sweep
+        # Guarantee every activity still has title, description, location.
+        # Enrichment can overwrite these but may leave gaps on partial paths.
+        # ----------------------------------------------------------------
+        missing_fields_count = 0
+        for day in days:
+            for activity in day.get("activities", []):
+                if not activity.get("title") or not activity.get("description") or not activity.get("location"):
+                    _normalize_pre_enrichment(activity, request.destination)
+                    missing_fields_count += 1
+
+        if missing_fields_count:
+            logger.warning(
+                "ACTIVITY_SCHEMA_SWEEP destination=%r fixed_activities=%d "
+                "(enrichment left required fields empty)",
+                request.destination, missing_fields_count,
+            )
 
         # ----------------------------------------------------------------
         # Stage 8: Opening-Hours Validation (post-Geoapify, SCIF Pass 2)
