@@ -135,7 +135,7 @@ class GroqProvider(BaseLLMProvider):
         user_prompt: str,
         *,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int = 6000,
     ) -> str:
         """Multi-turn conversational completion via Groq."""
         messages = _build_messages(system_prompt, history, user_prompt)
@@ -149,7 +149,7 @@ class GroqProvider(BaseLLMProvider):
         user_prompt: str,
         *,
         temperature: float = 0.2,
-        max_tokens: int = 2048,
+        max_tokens: int = 6000,
     ) -> str:
         """
         Generate a JSON response and return a clean, parseable JSON string.
