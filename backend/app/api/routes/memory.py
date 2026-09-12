@@ -77,7 +77,7 @@ async def save_preference(
     return {"message": "Preference saved."}
 
 
-@router.post("/inferences/{inference_id}/reject", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/inferences/{inference_id}/reject", status_code=status.HTTP_200_OK)
 async def reject_inference(
     inference_id: str,
     current_user: CurrentUser,
