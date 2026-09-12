@@ -22,7 +22,11 @@ class ExplanationResponse(BaseModel):
     weather_match: float
     context_score: float
     confidence: float
+    # Added Phase 4: personalization score from behavioral memory.
+    # None for trips generated before this field was added (backward compatible).
+    personalization_score: float | None = None
     unavailable_factors: list[str] = Field(default_factory=list)
+
 
 
 class Activity(BaseModel):

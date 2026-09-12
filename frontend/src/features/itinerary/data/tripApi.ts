@@ -1,12 +1,37 @@
 import { apiClient } from "@/core/api/apiClient";
-import type { GenerateItineraryPayload, Trip } from "@/features/itinerary/domain/types";
+import type {
+  GenerateItineraryPayload,
+  Trip,
+  PlaceEnrichmentInline,
+} from "@/features/itinerary/domain/types";
+import type { CognitiveTrace } from "@/features/itinerary/domain/scif-types";
+
+// ─── Wire-format DTOs (snake_case, exactly as backend sends) ────────────────
 
 interface ExplanationDto {
   reason_text: string;
   budget_match: number;
   interest_match: number;
+  weather_match?: number;
   context_score: number;
   confidence: number;
+  unavailable_factors?: string[];
+}
+
+interface PlaceEnrichmentDto {
+  found: boolean;
+  matched_place_name?: string | null;
+  image_url?: string | null;
+  rating?: number | null;
+  rating_scale?: string | null;
+  reviews_count?: number | null;
+  address?: string | null;
+  opening_hours?: string | null;
+  lat?: number | null;
+  lon?: number | null;
+  category?: string | null;
+  source?: string | null;
+  source_id?: string | null;
 }
 
 interface ActivityDto {
@@ -20,6 +45,15 @@ interface ActivityDto {
   meal_type?: string | null;
   food_query?: string | null;
   explanation: ExplanationDto | null;
+  place_enrichment?: PlaceEnrichmentDto | null;
+  scif_rejected?: boolean | null;
+  scif_rejection_reason?: string | null;
+  verified?: boolean | null;
+  place_provider?: string | null;
+  place_id?: string | null;
+  rating?: number | null;
+  user_ratings_total?: number | null;
+  slot_intent?: string | null;
 }
 
 interface DayPlanDto {
@@ -39,6 +73,27 @@ interface TripDto {
   days: DayPlanDto[];
   estimated_total_cost: number;
   is_saved: boolean;
+  cognitive_trace?: CognitiveTrace | null;
+}
+
+// ─── Mapping helpers ─────────────────────────────────────────────────────────
+
+function toPlaceEnrichment(dto: PlaceEnrichmentDto): PlaceEnrichmentInline {
+  return {
+    found: dto.found,
+    matchedPlaceName: dto.matched_place_name,
+    imageUrl: dto.image_url,
+    rating: dto.rating,
+    ratingScale: dto.rating_scale,
+    reviewsCount: dto.reviews_count,
+    address: dto.address,
+    openingHours: dto.opening_hours,
+    lat: dto.lat,
+    lon: dto.lon,
+    category: dto.category,
+    source: dto.source,
+    sourceId: dto.source_id,
+  };
 }
 
 function toTrip(dto: TripDto): Trip {
@@ -52,6 +107,7 @@ function toTrip(dto: TripDto): Trip {
     travelStyle: dto.travel_style,
     estimatedTotalCost: dto.estimated_total_cost,
     isSaved: dto.is_saved,
+    cognitiveTrace: dto.cognitive_trace ?? null,
     days: dto.days.map((day) => ({
       dayNumber: day.day_number,
       title: day.title,
@@ -70,14 +126,29 @@ function toTrip(dto: TripDto): Trip {
               reasonText: a.explanation.reason_text,
               budgetMatch: a.explanation.budget_match,
               interestMatch: a.explanation.interest_match,
+              weatherMatch: a.explanation.weather_match ?? 0,
               contextScore: a.explanation.context_score,
               confidence: a.explanation.confidence,
+              unavailableFactors: a.explanation.unavailable_factors ?? [],
             }
           : null,
+        placeEnrichment: a.place_enrichment
+          ? toPlaceEnrichment(a.place_enrichment)
+          : null,
+        scifRejected: a.scif_rejected,
+        scifRejectionReason: a.scif_rejection_reason,
+        verified: a.verified,
+        placeProvider: a.place_provider,
+        placeId: a.place_id,
+        rating: a.rating,
+        userRatingsTotal: a.user_ratings_total,
+        slotIntent: a.slot_intent,
       })),
     })),
   };
 }
+
+// ─── API surface ──────────────────────────────────────────────────────────────
 
 export const tripApi = {
   async generate(payload: GenerateItineraryPayload): Promise<Trip> {
@@ -95,7 +166,9 @@ export const tripApi = {
   },
 
   async list(savedOnly = false): Promise<Trip[]> {
-    const { data } = await apiClient.get<TripDto[]>("/trips", { params: { saved_only: savedOnly } });
+    const { data } = await apiClient.get<TripDto[]>("/trips", {
+      params: { saved_only: savedOnly },
+    });
     return data.map(toTrip);
   },
 

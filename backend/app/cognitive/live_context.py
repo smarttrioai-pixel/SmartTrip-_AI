@@ -21,6 +21,12 @@ If a provider is unavailable, mark status="unavailable". Never fabricate.
 
 CognitiveDecision is the SCIF decision output — each decision traces back
 to a specific piece of evidence and can be audited.
+
+New additions (SCIF architecture improvement):
+    BudgetContext        — pre-Qwen budget breakdown from BudgetAgent
+    AgentOutput          — named agent contribution record for the trace
+    PipelineStage        — per-stage execution record for cognitive trace
+    CognitivePlanningContext — canonical single context for the full pipeline
 """
 from __future__ import annotations
 
@@ -200,7 +206,230 @@ class LiveContext:
 
 
 # -----------------------------------------------------------------------
-# E. CognitiveContext — the full cognitive context object
+# E. BudgetContext — pre-Qwen budget analysis from BudgetAgent
+# -----------------------------------------------------------------------
+
+@dataclass
+class BudgetContext:
+    """
+    Budget breakdown produced by BudgetAgent before Qwen generates.
+
+    All amounts are in the user's requested currency.
+    tier: "budget" | "mid_range" | "luxury" — based on daily_per_person
+    constraints: human-readable budget rules passed to SCIF Pass 1 and Qwen.
+
+    Never fabricates exchange rates or per-destination cost-of-living.
+    Uses simple ratios based on input budget only.
+    """
+    total_budget: float
+    currency: str
+    num_days: int
+    daily_budget: float                     # total_budget / num_days
+    meal_budget_per_day: float              # ~25% of daily
+    activity_budget_per_day: float          # ~35% of daily
+    transport_budget_per_day: float         # ~20% of daily
+    accommodation_budget_per_day: float     # ~20% of daily
+    tier: str                               # "budget" | "mid_range" | "luxury"
+    constraints: list[str] = field(default_factory=list)
+    source: str = "internal_calculation"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total_budget": self.total_budget,
+            "currency": self.currency,
+            "num_days": self.num_days,
+            "daily_budget": round(self.daily_budget, 2),
+            "meal_budget_per_day": round(self.meal_budget_per_day, 2),
+            "activity_budget_per_day": round(self.activity_budget_per_day, 2),
+            "transport_budget_per_day": round(self.transport_budget_per_day, 2),
+            "accommodation_budget_per_day": round(self.accommodation_budget_per_day, 2),
+            "tier": self.tier,
+            "constraints": self.constraints,
+            "source": self.source,
+        }
+
+
+# -----------------------------------------------------------------------
+# F. AgentOutput — named agent contribution record
+# -----------------------------------------------------------------------
+
+@dataclass
+class AgentOutput:
+    """
+    Records what one named planning agent contributed to the shared context.
+
+    agent_name: one of:
+        "MemoryAgent", "WeatherAgent", "NavigationAgent",
+        "PlaceAgent", "RestaurantAgent", "BudgetAgent", "SafetyAgent"
+
+    status: "ok" | "unavailable" | "error"
+    data_source: e.g. "Firestore", "Open-Meteo", "Google Places", "internal"
+    contribution_summary: short text for the cognitive trace (no sensitive data)
+    items_returned: count of items returned (preferences, weather days, etc.)
+    latency_ms: wall-clock time of this agent's execution
+    """
+    agent_name: str
+    status: str                          # "ok" | "unavailable" | "error"
+    data_source: str
+    contribution_summary: str
+    items_returned: int = 0
+    latency_ms: float = 0.0
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent": self.agent_name,
+            "status": self.status,
+            "data_source": self.data_source,
+            "contribution": self.contribution_summary,
+            "items_returned": self.items_returned,
+            "latency_ms": round(self.latency_ms, 1),
+            "details": self.details,
+        }
+
+
+# -----------------------------------------------------------------------
+# G. PipelineStage — records one stage's execution for the cognitive trace
+# -----------------------------------------------------------------------
+
+@dataclass
+class PipelineStage:
+    """
+    Records the execution of one stage in the SCIF pipeline.
+    Used to produce the cognitive trace that proves the pipeline ran.
+
+    stage_name: e.g. "MEMORY_RETRIEVAL", "WEATHER_FETCH", "SCIF_PASS_1", etc.
+    component: class/service name that ran (e.g. "MemoryEngine")
+    status: "ok" | "skipped" | "error"
+    """
+    stage_name: str
+    component: str
+    status: str
+    summary: str
+    latency_ms: float = 0.0
+    items: int = 0
+    data_source: str = "internal"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage_name,
+            "component": self.component,
+            "status": self.status,
+            "summary": self.summary,
+            "latency_ms": round(self.latency_ms, 1),
+            "items": self.items,
+            "data_source": self.data_source,
+        }
+
+
+# -----------------------------------------------------------------------
+# H. CognitivePlanningContext — canonical context for the full pipeline
+# -----------------------------------------------------------------------
+
+@dataclass
+class CognitivePlanningContext:
+    """
+    The canonical structured object that unifies all SCIF inputs before Qwen.
+
+    This is what SCIF Pass 1 produces and what the ContextBuilder consumes
+    to build the Qwen prompt. Every field has a clear data source.
+
+    Key design rule: keep ALL sources separate. Never merge Firestore memory
+    into weather data into profile data.
+    """
+    # --- User request ---
+    destination: str = ""
+    start_date_iso: str = ""
+    end_date_iso: str = ""
+    num_days: int = 1
+    budget: float = 0.0
+    currency: str = "USD"
+    travel_style: str = "balanced"
+    transport: str = "any"
+    interests: list[str] = field(default_factory=list)
+
+    # --- Destination coordinates (from NavigationAgent) ---
+    lat: float | None = None
+    lon: float | None = None
+    geocode_source: str = "unavailable"
+
+    # --- User profile (from UserProfileEngine) ---
+    food_preference: str = "no_preference"
+    accommodation: str = "hotel"
+    profile_interests: list[str] = field(default_factory=list)
+    profile_transport: str = "any"
+
+    # --- Persistent memory (from MemoryAgent / MemoryEngine) ---
+    memory_items: int = 0
+    memory_summary: str = ""
+    memory_preferences: list[str] = field(default_factory=list)
+    memory_feature_weights: dict[str, float] = field(default_factory=dict)
+
+    # --- Live context (from WeatherAgent / LiveContextEngine) ---
+    live_context: LiveContext = field(default_factory=LiveContext)
+    weather_constraints: list[str] = field(default_factory=list)
+
+    # --- Budget analysis (from BudgetAgent) ---
+    budget_context: BudgetContext | None = None
+
+    # --- Agent outputs (named contributions) ---
+    agent_outputs: list[AgentOutput] = field(default_factory=list)
+
+    # --- SCIF Pass 1 decisions and constraints ---
+    scif_constraints: list[str] = field(default_factory=list)
+    scif_decisions_pre: list[CognitiveDecision] = field(default_factory=list)
+
+    # --- Pipeline execution trace ---
+    pipeline_stages: list[PipelineStage] = field(default_factory=list)
+
+    def add_agent_output(self, output: AgentOutput) -> None:
+        self.agent_outputs.append(output)
+
+    def add_stage(self, stage: PipelineStage) -> None:
+        self.pipeline_stages.append(stage)
+
+    def get_agent(self, name: str) -> AgentOutput | None:
+        for a in self.agent_outputs:
+            if a.agent_name == name:
+                return a
+        return None
+
+    def all_constraints(self) -> list[str]:
+        """Merged list of weather + budget + SCIF constraints for the prompt."""
+        return self.weather_constraints + self.scif_constraints
+
+    def to_trace_dict(self) -> dict[str, Any]:
+        """Non-sensitive summary for the cognitive_trace API field."""
+        return {
+            "destination": self.destination,
+            "dates": f"{self.start_date_iso} → {self.end_date_iso}",
+            "num_days": self.num_days,
+            "coordinates": {
+                "lat": self.lat,
+                "lon": self.lon,
+                "source": self.geocode_source,
+            },
+            "memory": {
+                "items_retrieved": self.memory_items,
+                "source": "Firestore/memory_longterm",
+                "summary": self.memory_summary[:200] if self.memory_summary else "",
+            },
+            "profile": {
+                "food_preference": self.food_preference,
+                "travel_style": self.travel_style,
+                "interests": self.profile_interests,
+            },
+            "budget": self.budget_context.to_dict() if self.budget_context else {},
+            "weather": self.live_context.to_summary_dict(),
+            "weather_constraints": self.weather_constraints,
+            "scif_constraints": self.scif_constraints,
+            "agent_outputs": [a.to_dict() for a in self.agent_outputs],
+            "pipeline_stages": [s.to_dict() for s in self.pipeline_stages],
+        }
+
+
+# -----------------------------------------------------------------------
+# I. CognitiveContext — the full cognitive context object
 # -----------------------------------------------------------------------
 
 @dataclass
@@ -238,9 +467,12 @@ class CognitiveContext:
     # Set by PlanningEngine after Stage 7 enrichment completes.
     provider_trace: dict[str, Any] = field(default_factory=dict)
 
+    # G. Full pipeline context (populated when SCIFOrchestrator runs)
+    planning_context: CognitivePlanningContext | None = None
+
     def to_trace_dict(self) -> dict[str, Any]:
         """Returns a non-sensitive summary for debug/logging."""
-        return {
+        base = {
             "current_request": self.current_request,
             "memory_used": self.memory_items > 0,
             "memory_items": self.memory_items,
@@ -252,3 +484,7 @@ class CognitiveContext:
             "candidate_stats": self.provider_trace.get("candidate_stats", {}),
             "rejected_slots": self.provider_trace.get("rejected_slots", []),
         }
+        # Include the full planning context trace if available
+        if self.planning_context is not None:
+            base["scif_pipeline"] = self.planning_context.to_trace_dict()
+        return base

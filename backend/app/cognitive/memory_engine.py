@@ -23,8 +23,14 @@ from app.repositories.memory_repository import MemoryRepository
 LEARNING_RATE = 0.1
 TOP_K_PREFERENCES = 10
 SIMILARITY_THRESHOLD = 0.6
-PROMOTION_THRESHOLD = 0.4
-PROMOTION_LOOKBACK_EVENTS = 25  # approx. last ~5 trips' worth of events
+# Threshold for feature weight before a behavioral pattern qualifies for promotion
+# to a named InferredPreference. Lowered from 0.4 to 0.3 to enable earlier promotion
+# once genuine per-activity feedback (not just trip-save events) is collected.
+PROMOTION_THRESHOLD = 0.3
+# How many recent events are needed before promotion is evaluated.
+# Lowered from 25 (which required ~25 trip saves) to 5 (achievable from
+# per-activity feedback in a single trip session).
+PROMOTION_LOOKBACK_EVENTS = 5  # approx. 1 trip's worth of per-activity feedback
 
 # Templated statements for the promotion algorithm (Phase 3 design doc,
 # Section 5) - intentionally NOT freely LLM-generated, so every inferred
@@ -71,7 +77,93 @@ class MemoryContext:
         return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Feature-delta resolution helpers
+# ---------------------------------------------------------------------------
+
+# Maps (rejection_reason) → {feature: direction}
+# IMPORTANT: These directions are fed into record_event() which uses:
+#   target = direction * signal   where signal=-1.0 for "reject"
+# So to make budget_sensitivity go NEGATIVE after "too_expensive":
+#   direction=+1.0 → target=(+1.0)*(-1.0)=-1.0 → weight moves negative ✓
+#
+# Desired semantic:
+#   too_expensive  → budget_sensitivity goes NEGATIVE  (low = "prefers value")
+#   too_crowded    → crowd_aversion goes POSITIVE       (high = "avoids crowds")
+#   too_far        → distance_tolerance goes NEGATIVE   (low = "prefers nearby")
+#   not_interested → novelty_seeking goes NEGATIVE      (low = "less novelty")
+#   already_visited→ novelty_seeking goes POSITIVE      (high = "seek new things")
+_REJECTION_REASON_DELTAS: dict[str, dict[str, float]] = {
+    "too_expensive":   {"budget_sensitivity": 1.0},    # reject: target = 1.0*(-1.0) = -1.0 ✓
+    "too_crowded":     {"crowd_aversion": -1.0},        # reject: target = (-1.0)*(-1.0) = +1.0 ✓
+    "too_far":         {"distance_tolerance": 1.0},     # reject: target = 1.0*(-1.0) = -1.0 ✓
+    "not_interested":  {"novelty_seeking": 0.5},        # reject: target = 0.5*(-1.0) = -0.5 ✓
+    "already_visited": {"novelty_seeking": -0.5},       # reject: target = (-0.5)*(-1.0) = +0.5 ✓
+    "wrong_type":      {},
+    "other":           {},
+}
+
+# Maps activity category → feature directions for ACCEPT event (signal=+1.0)
+# To increase novelty_seeking: direction=+1.0 → target=(+1.0)*(+1.0)=+1.0 ✓
+_CATEGORY_ACCEPT_DELTAS: dict[str, dict[str, float]] = {
+    "culture":     {"novelty_seeking": 0.3},
+    "attraction":  {"novelty_seeking": 0.2},
+    "museum":      {"novelty_seeking": 0.3},
+    "nature":      {"novelty_seeking": 0.4, "crowd_aversion": 0.2},
+    "shopping":    {"novelty_seeking": -0.2},
+    "meal":        {},
+    "transport":   {},
+    "other":       {},
+}
+
+
+
+def _resolve_feature_deltas(
+    activity_category: str,
+    event_type: str,
+    rejection_reason: str | None,
+) -> dict[str, float]:
+    """
+    Map an activity feedback event to behavioral feature deltas.
+
+    Rules:
+    - On reject: deltas primarily come from the rejection_reason (what the user
+      disliked). Category gives a weaker secondary signal.
+    - On accept: deltas come from the category (what kind of thing the user liked).
+    - On edit:  mild deltas, half the strength of accept.
+
+    Returns: dict[feature_name → direction] where direction is in [-1, +1].
+    The actual update magnitude is controlled by LEARNING_RATE in record_event().
+    """
+    deltas: dict[str, float] = {}
+
+    if event_type == "reject":
+        # Primary signal: rejection reason
+        if rejection_reason and rejection_reason in _REJECTION_REASON_DELTAS:
+            deltas.update(_REJECTION_REASON_DELTAS[rejection_reason])
+        # Secondary signal: category (mild — -0.1 interest bias)
+        cat = (activity_category or "").lower()
+        if cat in ("attraction", "culture", "museum", "nature"):
+            # Rejected a cultural/nature activity: mild novelty-seeking reduction
+            deltas.setdefault("novelty_seeking", -0.1)
+
+    elif event_type == "accept":
+        cat = (activity_category or "").lower()
+        category_deltas = _CATEGORY_ACCEPT_DELTAS.get(cat, {})
+        deltas.update(category_deltas)
+
+    elif event_type == "edit":
+        # Edit = mild positive signal (user liked it enough to keep, just changed it)
+        cat = (activity_category or "").lower()
+        category_deltas = _CATEGORY_ACCEPT_DELTAS.get(cat, {})
+        # Half the strength of accept
+        deltas.update({k: v * 0.5 for k, v in category_deltas.items()})
+
+    return deltas
+
+
 class MemoryEngine:
+
     def __init__(self, memory_repository: MemoryRepository, chat_repository: ChatRepository) -> None:
         self._memory = memory_repository
         self._chats = chat_repository
@@ -118,6 +210,71 @@ class MemoryEngine:
             BehavioralEvent(recommendation_id=recommendation_id, event_type=event_type, feature_deltas=feature_deltas)
         )
         await self._memory.save_behavioral(behavioral)
+
+    async def record_activity_event(
+        self,
+        *,
+        user_id: str,
+        trip_id: str,
+        activity_title: str,
+        activity_category: str,
+        event_type: str,          # "accept" | "reject" | "edit"
+        rejection_reason: str | None = None,
+        rating: int | None = None,
+        free_text: str | None = None,
+    ) -> None:
+        """
+        High-level method called by the /memory/feedback API endpoint.
+
+        1. Resolves feature_deltas from activity category + rejection_reason.
+        2. Calls record_event() to update behavioral feature_weights in Firestore.
+        3. Persists a FeedbackMemory document to memory_feedback collection.
+        4. Triggers run_promotion() to promote strong patterns to InferredPreferences.
+        """
+        feature_deltas = _resolve_feature_deltas(activity_category, event_type, rejection_reason)
+
+        # 1. Update behavioral memory (feature weights)
+        await self.record_event(user_id, trip_id, event_type, feature_deltas)
+
+        # 2. Persist feedback document to memory_feedback collection
+        #    Derive sentiment from event_type + rating
+        if event_type == "accept":
+            sentiment = "positive"
+        elif event_type == "reject":
+            sentiment = "negative"
+        else:
+            sentiment = "neutral"
+
+        if rating is not None:
+            if rating >= 4:
+                sentiment = "positive"
+            elif rating <= 2:
+                sentiment = "negative"
+            else:
+                sentiment = "neutral"
+
+        full_text = activity_title
+        if rejection_reason:
+            full_text += f" | reason: {rejection_reason}"
+        if free_text:
+            full_text += f" | note: {free_text}"
+
+        await self._memory.add_feedback(
+            user_id=user_id,
+            trip_id=trip_id,
+            rating=rating if rating is not None else (5 if event_type == "accept" else 1),
+            sentiment=sentiment,
+            would_revisit=(event_type == "accept"),
+            free_text=full_text if full_text != activity_title else free_text,
+        )
+
+        # 3. Attempt to promote behavioral patterns to InferredPreferences
+        try:
+            await self.run_promotion(user_id)
+        except Exception:
+            pass  # promotion is non-critical; don't fail the feedback call
+
+
 
     async def save_preference(self, user_id: str, source_text: str, source_type: str) -> None:
         vector = await embed_text(source_text)
