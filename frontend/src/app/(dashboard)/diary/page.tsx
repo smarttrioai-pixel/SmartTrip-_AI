@@ -15,11 +15,15 @@ export default function TravelDiaryPage() {
   const [selectedTripId, setSelectedTripId] = useState<string | null>(null);
 
   // Auto-select first trip when loaded
-  useEffect(() => {
-    if (savedTrips && savedTrips.length > 0 && !selectedTripId) {
-      setSelectedTripId(savedTrips[0].id);
+useEffect(() => {
+  if (savedTrips && savedTrips.length > 0 && !selectedTripId) {
+    const firstTrip = savedTrips[0];
+
+    if (firstTrip) {
+      setSelectedTripId(firstTrip.id);
     }
-  }, [savedTrips, selectedTripId]);
+  }
+}, [savedTrips, selectedTripId]);
 
   const activeTrip = savedTrips?.find((t) => t.id === selectedTripId);
 
