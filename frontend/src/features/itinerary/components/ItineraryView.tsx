@@ -18,6 +18,11 @@ import { ActivityCard } from "@/features/itinerary/components/ActivityCard";
 import { ScifIntelligencePanel } from "@/features/itinerary/components/ScifIntelligencePanel";
 import { useFeedback } from "@/features/itinerary/hooks/useFeedback";
 import { Button } from "@/shared/components/ui/button";
+import { PlannerChat } from "@/features/itinerary/components/PlannerChat";
+import { AlternativePanel } from "@/features/itinerary/components/AlternativePanel";
+import { useAlternatives, useRemoveActivity, useMoveActivity, useReplaceActivity } from "@/features/itinerary/hooks/useItineraryActions";
+import type { Activity, ActivityAlternative, ModifyItineraryResponse } from "@/features/itinerary/domain/types";
+
 
 export function ItineraryView({ trip }: { trip: Trip }) {
   const setSaved = useSetTripSaved();
@@ -29,6 +34,67 @@ export function ItineraryView({ trip }: { trip: Trip }) {
 
   const days = trip.days ?? [];
   const activeDay = days[activeDayIndex];
+
+  // Itinerary Actions
+  const [alternativesActivity, setAlternativesActivity] = useState<{activity: Activity, dayNumber: number} | null>(null);
+  const [alternatives, setAlternatives] = useState<ActivityAlternative[]>([]);
+  const getAlternativesMutation = useAlternatives();
+  const removeMutation = useRemoveActivity(trip.id);
+  const moveMutation = useMoveActivity(trip.id);
+  const replaceMutation = useReplaceActivity(trip.id);
+
+  const handleGetAlternatives = (activity: Activity, dayNumber: number) => {
+    if (!activity.id) return;
+    setAlternativesActivity({ activity, dayNumber });
+    getAlternativesMutation.mutate(
+      { tripId: trip.id, activityId: activity.id, dayNumber },
+      {
+        onSuccess: (res) => {
+          setAlternatives(res.alternatives);
+        }
+      }
+    );
+  };
+
+  const handleRemove = (activityId: string, dayNumber: number) => {
+    removeMutation.mutate({ activityId, dayNumber });
+  };
+
+  const handleMove = (activityId: string, fromDay: number, toDay: number, newTime: string) => {
+    moveMutation.mutate({
+      activityId,
+      payload: { activity_id: activityId, from_day: fromDay, to_day: toDay, new_time: newTime }
+    });
+  };
+
+  const handleReplace = (alt: ActivityAlternative) => {
+    if (!alternativesActivity?.activity?.id) return;
+    replaceMutation.mutate(
+      {
+        activityId: alternativesActivity.activity.id,
+        payload: {
+          activity_id: alternativesActivity.activity.id,
+          day_number: alternativesActivity.dayNumber,
+          place_id: alt.place_id,
+          alternative_title: alt.title,
+        }
+      },
+      {
+        onSuccess: () => {
+          setAlternativesActivity(null);
+          setAlternatives([]);
+        }
+      }
+    );
+  };
+
+  const handleModification = (res: ModifyItineraryResponse) => {
+    if (res.conflict) {
+      alert(`Conflict: ${res.conflict}`);
+    } else {
+      alert(`Success: ${res.message}`);
+    }
+  };
 
   // Batch-enrich ALL activities (one request, matches by position).
   // Provides Geoapify enrichment on top of whatever inline place_enrichment
@@ -178,6 +244,10 @@ export function ItineraryView({ trip }: { trip: Trip }) {
                   destination={trip.destination}
                   feedbackState={getFeedbackState(activity.title)}
                   onFeedback={submitFeedback}
+                  dayNumber={activeDay.dayNumber}
+                  onGetAlternatives={handleGetAlternatives}
+                  onRemove={handleRemove}
+                  onMove={handleMove}
                 />
               );
             })}
@@ -200,11 +270,27 @@ export function ItineraryView({ trip }: { trip: Trip }) {
                 destination={trip.destination}
                 feedbackState={getFeedbackState(activity.title)}
                 onFeedback={submitFeedback}
+                dayNumber={days[0].dayNumber}
+                onGetAlternatives={handleGetAlternatives}
+                onRemove={handleRemove}
+                onMove={handleMove}
               />
             );
           })}
         </div>
       )}
+
+      {/* Editable Trip Components */}
+      <PlannerChat tripId={trip.id} onModification={handleModification} />
+      
+      <AlternativePanel
+        isOpen={alternativesActivity !== null}
+        activityTitle={alternativesActivity?.activity.title ?? ""}
+        alternatives={alternatives}
+        isLoading={getAlternativesMutation.isPending}
+        onReplace={handleReplace}
+        onClose={() => setAlternativesActivity(null)}
+      />
     </div>
   );
 }

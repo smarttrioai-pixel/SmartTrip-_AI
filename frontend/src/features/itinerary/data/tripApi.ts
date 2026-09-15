@@ -3,6 +3,12 @@ import type {
   GenerateItineraryPayload,
   Trip,
   PlaceEnrichmentInline,
+  ModifyItineraryRequest,
+  ModifyItineraryResponse,
+  AlternativesResponse,
+  ReplaceActivityRequest,
+  MoveActivityRequest,
+  ReorderRequest,
 } from "@/features/itinerary/domain/types";
 import type { CognitiveTrace } from "@/features/itinerary/domain/scif-types";
 
@@ -178,5 +184,72 @@ export const tripApi = {
 
   async remove(tripId: string): Promise<void> {
     await apiClient.delete(`/trips/${tripId}`);
+  },
+
+  async modifyItinerary(
+    tripId: string,
+    payload: ModifyItineraryRequest
+  ): Promise<ModifyItineraryResponse> {
+    const { data } = await apiClient.post<ModifyItineraryResponse>(`/trips/${tripId}/modify`, payload);
+    return data;
+  },
+
+  async getAlternatives(
+    tripId: string,
+    activityId: string,
+    dayNumber: number
+  ): Promise<AlternativesResponse> {
+    const { data } = await apiClient.get<AlternativesResponse>(
+      `/trips/${tripId}/activities/${activityId}/alternatives`,
+      { params: { day_number: dayNumber } }
+    );
+    return data;
+  },
+
+  async replaceActivity(
+    tripId: string,
+    activityId: string,
+    payload: ReplaceActivityRequest
+  ): Promise<ModifyItineraryResponse> {
+    const { data } = await apiClient.post<ModifyItineraryResponse>(
+      `/trips/${tripId}/activities/${activityId}/replace`,
+      payload
+    );
+    return data;
+  },
+
+  async moveActivity(
+    tripId: string,
+    activityId: string,
+    payload: MoveActivityRequest
+  ): Promise<ModifyItineraryResponse> {
+    const { data } = await apiClient.post<ModifyItineraryResponse>(
+      `/trips/${tripId}/activities/${activityId}/move`,
+      payload
+    );
+    return data;
+  },
+
+  async removeActivity(
+    tripId: string,
+    activityId: string,
+    dayNumber: number
+  ): Promise<ModifyItineraryResponse> {
+    const { data } = await apiClient.delete<ModifyItineraryResponse>(
+      `/trips/${tripId}/activities/${activityId}`,
+      { data: { day_number: dayNumber } }
+    );
+    return data;
+  },
+
+  async reorderActivities(
+    tripId: string,
+    payload: ReorderRequest
+  ): Promise<ModifyItineraryResponse> {
+    const { data } = await apiClient.post<ModifyItineraryResponse>(
+      `/trips/${tripId}/activities/reorder`,
+      payload
+    );
+    return data;
   },
 };

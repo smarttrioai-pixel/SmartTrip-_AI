@@ -31,7 +31,25 @@ export interface PlaceEnrichmentInline {
   sourceId?: string | null;
 }
 
+export interface ActivityAlternative {
+  place_id: string;
+  title: string;
+  description: string;
+  category: string;
+  location: string;
+  lat?: number | null;
+  lon?: number | null;
+  distance_meters?: number | null;
+  estimated_cost: number;
+  duration_minutes?: number | null;
+  opening_status?: string | null;
+  rating?: number | null;
+  reason: string;
+  preference_match?: number | null;
+}
+
 export interface Activity {
+  id?: string | null;
   time: string;
   title: string;
   description: string;
@@ -54,6 +72,15 @@ export interface Activity {
   rating?: number | null;           // 0-5 Google rating
   userRatingsTotal?: number | null; // Google review count
   slotIntent?: string | null;       // Qwen-generated intent before enrichment
+  duration_minutes?: number | null;
+  travel_time_minutes?: number | null;
+  travel_mode?: string | null;
+  booking_required?: boolean;
+  weather_suitability?: string | null;
+  liked?: boolean | null;
+  disliked?: boolean | null;
+  user_feedback?: string | null;
+  alternatives?: ActivityAlternative[] | null;
 }
 
 export interface DayPlan {
@@ -86,4 +113,40 @@ export interface GenerateItineraryPayload {
   travelStyle: string;
   interests: string[];
   transport: string;
+}
+
+export interface ModifyItineraryRequest {
+  user_message: string;
+}
+
+export interface ModifyItineraryResponse {
+  success: boolean;
+  message: string;
+  updated_trip?: Trip | null;
+  conflict?: string | null;
+  plan?: Record<string, unknown>;
+}
+
+export interface AlternativesResponse {
+  activity_id: string;
+  alternatives: ActivityAlternative[];
+}
+
+export interface ReplaceActivityRequest {
+  activity_id: string;
+  day_number: number;
+  place_id: string;
+  alternative_title: string;
+}
+
+export interface MoveActivityRequest {
+  activity_id: string;
+  from_day: number;
+  to_day: number;
+  new_time: string;
+}
+
+export interface ReorderRequest {
+  day_number: number;
+  ordered_activity_ids: string[];
 }

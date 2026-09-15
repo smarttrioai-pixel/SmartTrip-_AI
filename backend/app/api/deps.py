@@ -24,6 +24,8 @@ from app.services.chat_service import ChatService
 from app.services.context_builder import ContextBuilder
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_service import LLMService
+from app.services.providers.base import BaseLLMProvider
+from app.services.providers.openai_provider import OpenAIProvider
 from app.services.providers.groq_provider import GroqProvider
 from app.services.place_enrichment_service import PlaceEnrichmentService, get_place_enrichment_service
 from app.integrations.geoapify_provider import GeoapifyProvider, get_geoapify_provider
@@ -40,29 +42,37 @@ bearer_scheme = HTTPBearer(auto_error=False)
 _settings = get_settings()
 
 
-def get_llm_provider() -> GroqProvider:
-    """
-    Construct the Groq LLM provider from config.
-
-    Returns a GroqProvider singleton-per-process instance. Text generation
-    for all SCIF engines, routes, and services routes through Groq's
-    OpenAI-compatible API using model settings.GROQ_MODEL.
-    """
-    if not _settings.GROQ_API_KEY:
-        raise RuntimeError(
-            "GROQ_API_KEY is not set. "
-            "Set GROQ_API_KEY in your environment or .env file."
+def get_llm_provider() -> BaseLLMProvider:
+    """Factory: returns OpenAIProvider or GroqProvider based on LLM_PROVIDER env var."""
+    provider = _settings.LLM_PROVIDER.lower()
+    if provider == "openai":
+        if not _settings.OPENAI_API_KEY:
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=groq."
+            )
+        return OpenAIProvider(
+            api_key=_settings.OPENAI_API_KEY,
+            model=_settings.OPENAI_ITINERARY_MODEL,
         )
-    return GroqProvider(
-        api_key=_settings.GROQ_API_KEY,
-        model=_settings.GROQ_MODEL,
-    )
+    elif provider == "groq":
+        if not _settings.GROQ_API_KEY:
+            raise RuntimeError(
+                "GROQ_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=openai."
+            )
+        return GroqProvider(
+            api_key=_settings.GROQ_API_KEY,
+            model=_settings.GROQ_MODEL,
+        )
+    else:
+        raise RuntimeError(
+            f"Unknown LLM_PROVIDER={_settings.LLM_PROVIDER!r}. Use 'openai' or 'groq'."
+        )
 
 
 def get_llm_service(
-    provider: Annotated[GroqProvider, Depends(get_llm_provider)],
+    provider: Annotated[BaseLLMProvider, Depends(get_llm_provider)],
 ) -> LLMService:
-    """Construct LLMService with the active Groq provider."""
+    """Construct LLMService with the active LLM provider."""
     return LLMService(provider)
 
 
@@ -224,14 +234,47 @@ def get_chat_service(
     memory_engine: Annotated[MemoryEngine, Depends(get_memory_engine)],
     llm_service: Annotated[LLMService, Depends(get_llm_service)],
     context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
+    trip_repo: Annotated[TripRepository, Depends(get_trip_repository)],
 ) -> ChatService:
-    return ChatService(repo, memory_engine, llm_service=llm_service, context_builder=context_builder)
+    return ChatService(
+        repo,
+        memory_engine,
+        llm_service=llm_service,
+        context_builder=context_builder,
+        trip_repository=trip_repo,
+    )
+
+
+
+def get_alternatives_service(
+    place_enrichment_service: Annotated[PlaceEnrichmentService, Depends(get_place_enrichment_engine)],
+    recommendation_engine: Annotated[RecommendationEngine, Depends(get_recommendation_engine)],
+    memory_engine: Annotated[MemoryEngine, Depends(get_memory_engine)],
+    llm_service: Annotated[LLMService, Depends(get_llm_service)],
+) -> 'AlternativeRecommendationService':
+    from app.services.alternatives_service import AlternativeRecommendationService
+    return AlternativeRecommendationService(
+        place_enrichment_service,
+        recommendation_engine,
+        memory_engine,
+        llm_service,
+    )
+
+
+
+def get_itinerary_modifier(
+    trip_repo: Annotated[TripRepository, Depends(get_trip_repository)],
+    llm_service: Annotated[LLMService, Depends(get_llm_service)],
+) -> 'ItineraryModifier':
+    from app.services.itinerary_modifier import ItineraryModifier
+    return ItineraryModifier(trip_repo, llm_service)
 
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     user_repository: Annotated[UserRepository, Depends(get_user_repository)],
 ) -> User:
+
     """
     Verifies the Firebase ID token on every protected request and resolves
     the Firestore profile document for that uid.
@@ -268,3 +311,19 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+from app.repositories.diary_repository import DiaryRepository
+from app.services.diary_service import DiaryService
+from app.integrations.gemini_vision_service import GeminiVisionService, get_gemini_vision_service
+
+def get_diary_repository(db: Annotated[AsyncClient, Depends(get_db)]) -> DiaryRepository:
+    return DiaryRepository(db)
+
+def get_diary_service(
+    diary_repo: Annotated[DiaryRepository, Depends(get_diary_repository)],
+    trip_repo: Annotated[TripRepository, Depends(get_trip_repository)],
+    llm_service: Annotated[LLMService, Depends(get_llm_service)],
+    vision_service: Annotated[GeminiVisionService, Depends(get_gemini_vision_service)],
+) -> DiaryService:
+    return DiaryService(diary_repo, trip_repo, llm_service, vision_service)
+

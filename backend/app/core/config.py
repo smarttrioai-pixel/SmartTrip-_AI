@@ -70,6 +70,42 @@ class Settings(BaseSettings):
     REDIS_URL: str | None = None
 
     # ------------------------------------------------------------------
+    # LLM Provider selection
+    # ------------------------------------------------------------------
+    LLM_PROVIDER: str = Field(
+        default="openai",
+        description="Primary LLM provider: 'openai' | 'groq'",
+    )
+
+    # ------------------------------------------------------------------
+    # OpenAI
+    # ------------------------------------------------------------------
+    OPENAI_API_KEY: str | None = Field(
+        default=None,
+        description="OpenAI API key (required when LLM_PROVIDER=openai)",
+    )
+    OPENAI_ITINERARY_MODEL: str = Field(
+        default="gpt-4o",
+        description="OpenAI model for itinerary generation",
+    )
+    OPENAI_CHAT_MODEL: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model for chat/tour guide",
+    )
+    OPENAI_DIARY_MODEL: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model for diary generation",
+    )
+
+    # ------------------------------------------------------------------
+    # PDF export
+    # ------------------------------------------------------------------
+    DIARY_PDF_ENABLED: bool = Field(
+        default=True,
+        description="Enable real PDF export via reportlab",
+    )
+
+    # ------------------------------------------------------------------
     # Groq Inference API  — TEXT GENERATION
     # All LLM text generation routes through Groq's OpenAI-compatible API.
     # ------------------------------------------------------------------

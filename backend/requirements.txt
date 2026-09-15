@@ -24,3 +24,6 @@ redis==5.0.8
 
 pytest==8.3.3
 pytest-asyncio==0.24.0
+
+# PDF export
+reportlab>=4.2.0

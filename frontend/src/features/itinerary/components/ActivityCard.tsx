@@ -12,6 +12,10 @@ import {
   CheckCircle2,
   AlertTriangle,
   ImageOff,
+  RefreshCw,
+  Trash2,
+  Edit3,
+  CalendarDays,
   Utensils,
   Landmark,
   TreePine,
@@ -91,6 +95,10 @@ export interface ActivityCardProps {
    */
   feedbackState?: FeedbackState;
   onFeedback?: (input: FeedbackInput) => void;
+  dayNumber: number;
+  onGetAlternatives?: (activity: Activity, dayNumber: number) => void;
+  onRemove?: (activityId: string, dayNumber: number) => void;
+  onMove?: (activityId: string, fromDay: number, toDay: number, newTime: string) => void;
 }
 
 // ─── Main component ────────────────────────────────────────────────────────
@@ -103,6 +111,10 @@ export function ActivityCard({
   destination,
   feedbackState,
   onFeedback,
+  dayNumber,
+  onGetAlternatives,
+  onRemove,
+  onMove,
 }: ActivityCardProps) {
   const router = useRouter();
   const [showWhy, setShowWhy] = useState(false);
@@ -400,11 +412,69 @@ export function ActivityCard({
               size="sm"
               variant="outline"
               onClick={handleExploreAR}
-              className="flex items-center gap-1.5"
+              className="flex items-center gap-1.5 hidden sm:flex"
               aria-label={`Explore ${activity.title} in AR`}
             >
               <Camera className="h-3.5 w-3.5" />
-              Explore in AR
+              AR
+            </Button>
+
+            {onGetAlternatives && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onGetAlternatives(activity, dayNumber)}
+                className="flex items-center gap-1.5"
+                title="Find alternatives"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Replace</span>
+              </Button>
+            )}
+
+            {onRemove && activity.id && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onRemove(activity.id!, dayNumber)}
+                className="flex items-center gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 border-red-100 dark:border-red-900/30"
+                title="Remove activity"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+
+            {onMove && activity.id && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  const toDay = prompt("Enter target day number:", String(dayNumber));
+                  if (!toDay) return;
+                  const parsedDay = parseInt(toDay, 10);
+                  if (isNaN(parsedDay) || parsedDay < 1) {
+                    alert("Invalid day number");
+                    return;
+                  }
+                  const newTime = prompt("Enter new time (e.g. 10:00 AM):", activity.time);
+                  if (!newTime) return;
+                  onMove(activity.id!, dayNumber, parsedDay, newTime);
+                }}
+                className="flex items-center gap-1.5"
+                title="Move activity"
+              >
+                <CalendarDays className="h-3.5 w-3.5" />
+              </Button>
+            )}
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => alert("Edit coming soon")}
+              className="flex items-center gap-1.5"
+              title="Edit activity"
+            >
+              <Edit3 className="h-3.5 w-3.5" />
             </Button>
 
             {/* Feedback buttons — only shown when onFeedback is wired in */}

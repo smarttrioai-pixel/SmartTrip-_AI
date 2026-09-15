@@ -10,6 +10,7 @@ import {
   Brain,
   Navigation,
   Camera,
+  Bot,
   BookOpen,
   BarChart3,
   Cpu,
@@ -37,6 +38,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: "Explore",
     items: [
+      { href: "/tour-guide", label: "AI Tour Guide", icon: Bot },
       { href: "/explore", label: "AR Explore", icon: Camera },
       { href: "/chat", label: "AI Chat", icon: MessageCircle },
     ],

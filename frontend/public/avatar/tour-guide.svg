@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 320" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#16a34a" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#15803d" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <ellipse cx="120" cy="300" rx="70" ry="12" fill="#000" opacity="0.2"/>
+  <!-- Body / kurta -->
+  <path d="M75 175 Q120 160 165 175 L175 290 Q120 300 65 290 Z" fill="#16a34a"/>
+  <path d="M95 175 L120 195 L145 175" stroke="#15803d" stroke-width="2" fill="none"/>
+  <!-- Dupatta -->
+  <path d="M145 120 Q180 140 170 220 Q155 210 140 200" fill="#fbbf24" opacity="0.9"/>
+  <path d="M95 120 Q60 140 70 220 Q85 210 100 200" fill="#fde68a" opacity="0.85"/>
+  <!-- Neck -->
+  <rect x="108" y="115" width="24" height="20" rx="8" fill="#c68642"/>
+  <!-- Face -->
+  <ellipse cx="120" cy="95" rx="38" ry="42" fill="#d4a574"/>
+  <!-- Hair -->
+  <path d="M82 88 Q120 45 158 88 Q160 70 120 55 Q80 70 82 88" fill="#1a1a1a"/>
+  <path d="M82 95 Q85 120 95 130 Q100 115 105 100" fill="#1a1a1a"/>
+  <path d="M158 95 Q155 120 145 130 Q140 115 135 100" fill="#1a1a1a"/>
+  <!-- Eyes -->
+  <ellipse cx="105" cy="92" rx="5" ry="6" fill="#1a1a1a"/>
+  <ellipse cx="135" cy="92" rx="5" ry="6" fill="#1a1a1a"/>
+  <circle cx="106" cy="90" r="1.5" fill="#fff"/>
+  <circle cx="136" cy="90" r="1.5" fill="#fff"/>
+  <!-- Smile -->
+  <path d="M108 108 Q120 118 132 108" stroke="#8b4513" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <!-- Bindi -->
+  <circle cx="120" cy="78" r="3" fill="#dc2626"/>
+  <!-- Arms -->
+  <path d="M75 180 Q55 210 60 250 Q70 245 80 220" fill="#16a34a"/>
+  <path d="M165 180 Q185 210 180 250 Q170 245 160 220" fill="#16a34a"/>
+  <ellipse cx="62" cy="255" rx="10" ry="8" fill="#d4a574"/>
+  <ellipse cx="178" cy="255" rx="10" ry="8" fill="#d4a574"/>
+  <rect width="240" height="320" fill="url(#bg)"/>
+</svg>

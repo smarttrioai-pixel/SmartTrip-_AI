@@ -36,5 +36,10 @@ class TripRepository:
     async def set_saved(self, trip_id: str, is_saved: bool) -> None:
         await self._collection.document(trip_id).update({"is_saved": is_saved})
 
+    async def update_days(self, trip_id: str, days: list[dict]) -> None:
+        """Update only the days/activities of an existing trip (for itinerary modifications)."""
+        await self._collection.document(trip_id).update({"days": days})
+
     async def delete(self, trip_id: str) -> None:
         await self._collection.document(trip_id).delete()
+

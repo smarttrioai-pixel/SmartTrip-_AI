@@ -29,7 +29,25 @@ class ExplanationResponse(BaseModel):
 
 
 
+class ActivityAlternative(BaseModel):
+    place_id: str
+    title: str
+    description: str
+    category: str
+    location: str
+    lat: float | None = None
+    lon: float | None = None
+    distance_meters: int | None = None
+    estimated_cost: float = 0.0
+    duration_minutes: int | None = None
+    opening_status: str | None = None
+    rating: float | None = None
+    reason: str = ""   # OpenAI-generated explanation
+    preference_match: float | None = None  # 0.0-1.0
+
+
 class Activity(BaseModel):
+    id: str | None = None               # uuid4, generated on creation
     time: str
     title: str
     description: str
@@ -54,7 +72,15 @@ class Activity(BaseModel):
     slot_intent: str | None = None
     # Description correction metadata
     description_corrected: bool | None = None
-
+    duration_minutes: int | None = None
+    travel_time_minutes: int | None = None
+    travel_mode: str | None = None      # walk|drive|transit
+    booking_required: bool = False
+    weather_suitability: str | None = None  # good|fair|poor
+    liked: bool | None = None
+    disliked: bool | None = None
+    user_feedback: str | None = None
+    alternatives: list['ActivityAlternative'] | None = None
 
 
 class DayPlanResponse(BaseModel):
@@ -81,3 +107,39 @@ class TripResponse(BaseModel):
 
 class SaveTripRequest(BaseModel):
     is_saved: bool = True
+
+
+class ModifyItineraryRequest(BaseModel):
+    """User's natural-language modification request."""
+    user_message: str = Field(..., min_length=1)
+
+class ModifyItineraryResponse(BaseModel):
+    """Result of applying a modification to the itinerary."""
+    success: bool
+    message: str
+    updated_trip: 'TripResponse | None' = None
+    conflict: str | None = None  # schedule conflict description if any
+
+class AlternativesRequest(BaseModel):
+    activity_id: str
+    day_number: int
+
+class AlternativesResponse(BaseModel):
+    activity_id: str
+    alternatives: list[ActivityAlternative]
+
+class ReplaceActivityRequest(BaseModel):
+    activity_id: str
+    day_number: int
+    place_id: str            # Google place_id of chosen alternative
+    alternative_title: str   # Human-readable confirmation
+
+class MoveActivityRequest(BaseModel):
+    activity_id: str
+    from_day: int
+    to_day: int
+    new_time: str            # e.g. "14:00"
+
+class ReorderRequest(BaseModel):
+    day_number: int
+    ordered_activity_ids: list[str]  # new order of activity ids
