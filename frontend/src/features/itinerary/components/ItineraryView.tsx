@@ -270,7 +270,7 @@ export function ItineraryView({ trip }: { trip: Trip }) {
                 destination={trip.destination}
                 feedbackState={getFeedbackState(activity.title)}
                 onFeedback={submitFeedback}
-                dayNumber={days[0].dayNumber}
+                dayNumber={days[0]?.dayNumber ?? 1}
                 onGetAlternatives={handleGetAlternatives}
                 onRemove={handleRemove}
                 onMove={handleMove}

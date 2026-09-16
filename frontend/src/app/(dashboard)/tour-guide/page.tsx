@@ -23,8 +23,9 @@ export default function TourGuidePage() {
   const [isAsking, setIsAsking] = useState(false);
 
   useEffect(() => {
-    if (savedTrips && savedTrips.length > 0 && !selectedTripId) {
-      setSelectedTripId(savedTrips[0].id);
+    const firstTrip = savedTrips?.[0];
+    if (firstTrip && !selectedTripId) {
+      setSelectedTripId(firstTrip.id);
     }
   }, [savedTrips, selectedTripId]);
 

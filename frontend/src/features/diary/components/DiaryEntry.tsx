@@ -5,7 +5,6 @@ import { useAddNote, useAddExpense, useAddPlace, useAddPhoto, useGenerateDayStor
 import { DiaryPhotoGrid } from './DiaryPhotoGrid';
 import { WritingStylePicker } from './WritingStylePicker';
 import { Button } from '@/shared/components/ui/button';
-import { Input } from '@/shared/components/ui/input';
 
 interface DiaryEntryProps {
   entry: DiaryEntryType;
@@ -97,11 +96,11 @@ export function DiaryEntry({ entry, tripId, isToday }: DiaryEntryProps) {
             ))}
           </div>
           <div className="flex gap-2">
-            <Input 
+            <input 
               value={newPlace} 
               onChange={(e) => setNewPlace(e.target.value)} 
               placeholder="Add a place..." 
-              className="text-sm h-9"
+              className="flex-1 text-sm h-9 px-3 rounded-md border border-input bg-background"
               onKeyDown={(e) => e.key === 'Enter' && handleAddPlace()}
             />
             <Button size="sm" onClick={handleAddPlace} disabled={!newPlace.trim() || addPlaceMutation.isPending}>Add</Button>
@@ -121,11 +120,11 @@ export function DiaryEntry({ entry, tripId, isToday }: DiaryEntryProps) {
             ))}
           </div>
           <div className="flex gap-2">
-            <Input 
+            <input 
               value={newNote} 
               onChange={(e) => setNewNote(e.target.value)} 
               placeholder="Jot down a quick memory..." 
-              className="text-sm h-9"
+              className="flex-1 text-sm h-9 px-3 rounded-md border border-input bg-background"
               onKeyDown={(e) => e.key === 'Enter' && handleAddNote()}
             />
             <Button size="sm" onClick={handleAddNote} disabled={!newNote.trim() || addNoteMutation.isPending}>Add</Button>
@@ -182,18 +181,18 @@ export function DiaryEntry({ entry, tripId, isToday }: DiaryEntryProps) {
 
           {isAddingExpense && (
             <div className="flex flex-wrap gap-2 p-3 bg-ink-50 dark:bg-ink-800/50 rounded-lg">
-              <Input 
+              <input 
                 placeholder="What did you buy?" 
                 value={expenseName}
                 onChange={(e) => setExpenseName(e.target.value)}
-                className="flex-1 min-w-[150px] h-9"
+                className="flex-1 min-w-[150px] h-9 px-3 rounded-md border border-input bg-background text-sm"
               />
-              <Input 
+              <input 
                 type="number"
                 placeholder="Amount" 
                 value={expenseAmount}
                 onChange={(e) => setExpenseAmount(e.target.value)}
-                className="w-24 h-9"
+                className="w-24 h-9 px-3 rounded-md border border-input bg-background text-sm"
               />
               <select 
                 value={expenseCurrency}
