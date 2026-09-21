@@ -7,6 +7,7 @@ from app.api.routes import (
     explore,
     memory,
     navigation,
+    personalization,
     places,
     profile,
     trips,
@@ -25,6 +26,7 @@ api_router.include_router(places.router)
 api_router.include_router(explore.router)
 api_router.include_router(diary.router)
 api_router.include_router(analytics.router)
+api_router.include_router(personalization.router)
 
 # Debug endpoints — only available in non-production environments
 if _settings.ENVIRONMENT != "production":

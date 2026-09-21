@@ -128,6 +128,11 @@ async def record_activity_feedback(
             rejection_reason=payload.rejection_reason,
             rating=payload.rating,
             free_text=payload.free_text,
+            estimated_cost=payload.estimated_cost,
+            daily_budget_hint=payload.daily_budget_hint,
+            weather_score=payload.weather_score,
+            opening_hrs_score=payload.opening_hrs_score,
+            context_composite=payload.context_composite,
         )
     except Exception as exc:
         logger.error(

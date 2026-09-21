@@ -15,10 +15,15 @@ completion event exists.
 """
 from __future__ import annotations
 
+import logging
+
 from app.integrations.embeddings import cosine_similarity, embed_text
 from app.models.memory import BehavioralEvent, InferredPreference, PreferenceEmbedding, new_id
+from app.models.scpm import SCPMTrainingRecord
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.memory_repository import MemoryRepository
+
+logger = logging.getLogger(__name__)
 
 LEARNING_RATE = 0.1
 TOP_K_PREFERENCES = 10
@@ -31,6 +36,10 @@ PROMOTION_THRESHOLD = 0.3
 # Lowered from 25 (which required ~25 trip saves) to 5 (achievable from
 # per-activity feedback in a single trip session).
 PROMOTION_LOOKBACK_EVENTS = 5  # approx. 1 trip's worth of per-activity feedback
+
+# SCPM retraining threshold — retrain whenever this many new records accumulate.
+# Configurable via SCPM_RETRAIN_THRESHOLD env var (see core/config.py).
+SCPM_RETRAIN_THRESHOLD = 10
 
 # Templated statements for the promotion algorithm (Phase 3 design doc,
 # Section 5) - intentionally NOT freely LLM-generated, so every inferred
@@ -164,9 +173,15 @@ def _resolve_feature_deltas(
 
 class MemoryEngine:
 
-    def __init__(self, memory_repository: MemoryRepository, chat_repository: ChatRepository) -> None:
+    def __init__(
+        self,
+        memory_repository: MemoryRepository,
+        chat_repository: ChatRepository,
+        scpm_repository=None,   # SCPMRepository | None — optional, injected by deps.py
+    ) -> None:
         self._memory = memory_repository
         self._chats = chat_repository
+        self._scpm = scpm_repository   # None = SCPM disabled for this request
 
     async def get_context(self, user_id: str, current_request_text: str, *, chat_id: str | None = None) -> MemoryContext:
         longterm = await self._memory.get_longterm(user_id)
@@ -222,6 +237,12 @@ class MemoryEngine:
         rejection_reason: str | None = None,
         rating: int | None = None,
         free_text: str | None = None,
+        # SCPM context fields (pre-feedback state — no leakage)
+        estimated_cost: float | None = None,
+        daily_budget_hint: float | None = None,
+        weather_score: float | None = None,
+        opening_hrs_score: float | None = None,
+        context_composite: float | None = None,
     ) -> None:
         """
         High-level method called by the /memory/feedback API endpoint.
@@ -229,7 +250,9 @@ class MemoryEngine:
         1. Resolves feature_deltas from activity category + rejection_reason.
         2. Calls record_event() to update behavioral feature_weights in Firestore.
         3. Persists a FeedbackMemory document to memory_feedback collection.
-        4. Triggers run_promotion() to promote strong patterns to InferredPreferences.
+        4. Writes a SCPMTrainingRecord to Firestore (if SCPM repository available).
+        5. Triggers run_promotion() to promote strong patterns to InferredPreferences.
+        6. Auto-triggers SCPM retraining when threshold is met.
         """
         feature_deltas = _resolve_feature_deltas(activity_category, event_type, rejection_reason)
 
@@ -268,11 +291,99 @@ class MemoryEngine:
             free_text=full_text if full_text != activity_title else free_text,
         )
 
-        # 3. Attempt to promote behavioral patterns to InferredPreferences
+        # 3. Write SCPM training record — only for accept/reject (not edit)
+        #    Edit events have an ambiguous label so we skip them.
+        if self._scpm and event_type in ("accept", "reject"):
+            await self._write_scpm_record(
+                user_id=user_id,
+                trip_id=trip_id,
+                activity_title=activity_title,
+                activity_category=activity_category,
+                event_type=event_type,
+                rejection_reason=rejection_reason,
+                estimated_cost=estimated_cost,
+                daily_budget_hint=daily_budget_hint,
+                weather_score=weather_score,
+                opening_hrs_score=opening_hrs_score,
+                context_composite=context_composite,
+            )
+
+        # 4. Attempt to promote behavioral patterns to InferredPreferences
         try:
             await self.run_promotion(user_id)
         except Exception:
             pass  # promotion is non-critical; don't fail the feedback call
+
+    async def _write_scpm_record(
+        self,
+        *,
+        user_id: str,
+        trip_id: str,
+        activity_title: str,
+        activity_category: str,
+        event_type: str,
+        rejection_reason: str | None,
+        estimated_cost: float | None,
+        daily_budget_hint: float | None,
+        weather_score: float | None,
+        opening_hrs_score: float | None,
+        context_composite: float | None,
+    ) -> None:
+        """
+        Write one SCPMTrainingRecord to Firestore and potentially trigger retraining.
+
+        Behavioral weights are loaded AFTER the event (they've just been updated
+        by record_event above). This is intentional — we want the model to train
+        on the most up-to-date user profile state at the time of each feedback.
+        """
+        try:
+            behavioral = await self._memory.get_behavioral(user_id)
+            weights = behavioral.feature_weights
+
+            record = SCPMTrainingRecord(
+                user_id=user_id,
+                trip_id=trip_id,
+                activity_title=activity_title,
+                category=activity_category,
+                estimated_cost=estimated_cost or 0.0,
+                daily_budget_hint=daily_budget_hint or 0.0,
+                weather_score=weather_score if weather_score is not None else 0.5,
+                opening_hrs_score=opening_hrs_score if opening_hrs_score is not None else 0.75,
+                context_composite=context_composite if context_composite is not None else 0.5,
+                budget_sensitivity=weights.get("budget_sensitivity", 0.0),
+                crowd_aversion=weights.get("crowd_aversion", 0.0),
+                novelty_seeking=weights.get("novelty_seeking", 0.0),
+                distance_tolerance=weights.get("distance_tolerance", 0.0),
+                pace_preference=weights.get("pace_preference", 0.0),
+                label=1 if event_type == "accept" else 0,
+                event_type=event_type,
+                rejection_reason=rejection_reason,
+            )
+            await self._scpm.add_training_record(record)
+
+            # Auto-trigger retraining when threshold is met
+            new_count = await self._scpm.increment_records_since_train(user_id)
+            if new_count >= SCPM_RETRAIN_THRESHOLD:
+                await self._auto_retrain(user_id)
+
+        except Exception as exc:
+            # SCPM record failures must never crash the feedback endpoint
+            logger.warning("SCPM_RECORD_WRITE_ERROR user=%s error=%s", user_id, exc)
+
+    async def _auto_retrain(self, user_id: str) -> None:
+        """Auto-trigger SCPM retraining in-process (lightweight for LR on small datasets)."""
+        try:
+            from app.cognitive.scpm.trainer import SCPMTrainer
+            records = await self._scpm.get_training_records(user_id)
+            trainer = SCPMTrainer()
+            meta = trainer.train(user_id, records)
+            await self._scpm.save_model_metadata(meta)
+            logger.info(
+                "SCPM_AUTO_RETRAIN user=%s status=%s samples=%d",
+                user_id, meta.status.value, meta.sample_count,
+            )
+        except Exception as exc:
+            logger.warning("SCPM_AUTO_RETRAIN_ERROR user=%s error=%s", user_id, exc)
 
 
 

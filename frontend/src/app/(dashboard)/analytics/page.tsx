@@ -4,6 +4,7 @@ import { BarChart3, Download, Brain, PieChart } from "lucide-react";
 import { Button } from "@/shared/components/ui/button";
 import { useAnalyticsDashboard } from "@/features/analytics/hooks/useAnalytics";
 import { analyticsApi } from "@/features/analytics/data/analyticsApi";
+import { SCPMStatusCard } from "@/features/analytics/components/SCPMStatusCard";
 
 export default function AnalyticsPage() {
   const { data: analytics, isLoading } = useAnalyticsDashboard();
@@ -100,6 +101,13 @@ export default function AnalyticsPage() {
           )}
         </div>
       </div>
+
+      {/* SCPM Personalization Model Card */}
+      <SCPMStatusCard
+        scpmStatus={analytics?.personalization_model}
+        onRetrain={() => {/* refetch analytics after retraining */}}
+      />
     </div>
   );
 }
+

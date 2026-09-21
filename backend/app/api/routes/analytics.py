@@ -23,14 +23,15 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Response
 
-from app.api.deps import CurrentUser, get_memory_engine, get_trip_repository
+from app.api.deps import CurrentUser, get_memory_engine, get_trip_repository, get_scpm_repository
 from app.cognitive.memory_engine import MemoryEngine
 from app.repositories.trip_repository import TripRepository
+from app.repositories.scpm_repository import SCPMRepository
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
 
-async def _build_dashboard(current_user, trip_repository: TripRepository, memory_engine: MemoryEngine) -> dict[str, Any]:
+async def _build_dashboard(current_user, trip_repository: TripRepository, memory_engine: MemoryEngine, scpm_repository=None) -> dict[str, Any]:
     trips = await trip_repository.list_for_user(current_user.id)
 
     total_trips = len(trips)
@@ -43,6 +44,28 @@ async def _build_dashboard(current_user, trip_repository: TripRepository, memory
     )
 
     insights = await memory_engine.get_insights(current_user.id)
+
+    # SCPM model status (if repository available)
+    scpm_status: dict[str, Any] = {"available": False}
+    if scpm_repository is not None:
+        try:
+            meta = await scpm_repository.get_model_metadata(current_user.id)
+            total_records, pos_records, neg_records = await scpm_repository.count_training_records(current_user.id)
+            scpm_status = {
+                "available": True,
+                "active": meta.is_active,
+                "status": meta.status.value,
+                "sample_count": total_records,
+                "positive_count": pos_records,
+                "negative_count": neg_records,
+                "accuracy": round(meta.accuracy, 4) if meta.accuracy is not None else None,
+                "baseline_accuracy": round(meta.baseline_accuracy, 4) if meta.baseline_accuracy is not None else None,
+                "f1": round(meta.f1, 4) if meta.f1 is not None else None,
+                "trained_at": meta.trained_at.isoformat() if meta.trained_at else None,
+                "personalization_source": "SCPM (trained ML model)" if meta.is_active else "heuristic (cold-start)",
+            }
+        except Exception:
+            scpm_status = {"available": True, "error": "Failed to load SCPM status"}
 
     return {
         "user_id": current_user.id,
@@ -64,6 +87,7 @@ async def _build_dashboard(current_user, trip_repository: TripRepository, memory
             "active_inferred_preferences": len(insights.get("inferred_preferences", [])),
             "behavioral_feature_weights": insights.get("feature_weights", {}),
         },
+        "personalization_model": scpm_status,
         "recommendation_accuracy": None,
         "recommendation_accuracy_note": (
             "Not measurable yet — requires an evaluation harness with ground-truth user feedback."
@@ -76,8 +100,9 @@ async def get_analytics_dashboard(
     current_user: CurrentUser,
     trip_repository: Annotated[TripRepository, Depends(get_trip_repository)],
     memory_engine: Annotated[MemoryEngine, Depends(get_memory_engine)],
+    scpm_repo: Annotated[SCPMRepository, Depends(get_scpm_repository)],
 ) -> dict[str, Any]:
-    return await _build_dashboard(current_user, trip_repository, memory_engine)
+    return await _build_dashboard(current_user, trip_repository, memory_engine, scpm_repository=scpm_repo)
 
 
 @router.get("/export-csv", summary="Export real travel statistics as CSV")
@@ -85,8 +110,9 @@ async def export_analytics_csv(
     current_user: CurrentUser,
     trip_repository: Annotated[TripRepository, Depends(get_trip_repository)],
     memory_engine: Annotated[MemoryEngine, Depends(get_memory_engine)],
+    scpm_repo: Annotated[SCPMRepository, Depends(get_scpm_repository)],
 ) -> Response:
-    dashboard = await _build_dashboard(current_user, trip_repository, memory_engine)
+    dashboard = await _build_dashboard(current_user, trip_repository, memory_engine, scpm_repository=scpm_repo)
 
     buffer = io.StringIO()
     writer = csv.writer(buffer)

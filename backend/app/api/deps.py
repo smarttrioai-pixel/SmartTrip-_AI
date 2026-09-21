@@ -34,6 +34,8 @@ from app.cognitive.tourist_ranker import TouristRanker, get_tourist_ranker
 from app.cognitive.place_consistency import PlaceConsistencyValidator, get_place_consistency_validator
 from app.cognitive.live_context_engine import LiveContextEngine, get_live_context_engine
 from app.services.trip_service import TripPlannerService
+from app.repositories.scpm_repository import SCPMRepository
+from app.cognitive.scpm.model_metadata import ModelMetadata
 
 # `auto_error=False` so a missing header falls through to our own 401 with a
 # consistent shape, instead of FastAPI's default HTTPBearer error body.
@@ -120,11 +122,16 @@ def get_memory_repository(db: Annotated[AsyncClient, Depends(get_db)]) -> Memory
     return MemoryRepository(db)
 
 
+def get_scpm_repository(db: Annotated[AsyncClient, Depends(get_db)]) -> SCPMRepository:
+    return SCPMRepository(db)
+
+
 def get_memory_engine(
     memory_repo: Annotated[MemoryRepository, Depends(get_memory_repository)],
     chat_repo: Annotated[ChatRepository, Depends(get_chat_repository)],
+    scpm_repo: Annotated[SCPMRepository, Depends(get_scpm_repository)],
 ) -> MemoryEngine:
-    return MemoryEngine(memory_repo, chat_repo)
+    return MemoryEngine(memory_repo, chat_repo, scpm_repository=scpm_repo)
 
 
 def get_user_profile_engine(
@@ -205,6 +212,7 @@ def get_planning_engine(
     llm_service: Annotated[LLMService, Depends(get_llm_service)],
     context_builder: Annotated[ContextBuilder, Depends(get_context_builder)],
     live_context_engine: Annotated[LiveContextEngine, Depends(get_live_context_engine_dep)],
+    scpm_repo: Annotated[SCPMRepository, Depends(get_scpm_repository)],
 ) -> PlanningEngine:
     return PlanningEngine(
         user_profile_engine,
@@ -218,6 +226,7 @@ def get_planning_engine(
         llm_service=llm_service,
         context_builder=context_builder,
         live_context_engine=live_context_engine,
+        scpm_repository=scpm_repo,
     )
 
 

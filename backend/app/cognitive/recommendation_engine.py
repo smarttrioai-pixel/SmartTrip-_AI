@@ -26,10 +26,13 @@ Phase 4 changes:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from app.cognitive.context_engine import ContextEngine, ContextScoreBreakdown
 from app.models.user import UserPreferences
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +43,8 @@ class ScoredActivity:
     context: ContextScoreBreakdown
     composite_score: float
     personalization_score: float = 0.5
+    personalization_source: str = "heuristic"  # "SCPM" or "heuristic"
+    scpm_probability: float | None = None       # raw SCPM output (for debug/observability)
     unavailable_factors: list[str] = field(default_factory=list)
 
 
@@ -55,6 +60,7 @@ class RecommendationEngine:
         destination_lat: float | None = None,
         destination_lon: float | None = None,
         feature_weights: dict[str, float] | None = None,
+        scpm_metadata=None,  # ModelMetadata | None — injected by PlanningEngine
     ) -> list[ScoredActivity]:
         """
         Real scoring pipeline:
@@ -75,18 +81,54 @@ class RecommendationEngine:
         scored: list[ScoredActivity] = []
         weights = feature_weights or {}
 
+        # Initialise SCPM predictor once if model is active
+        scpm_predictor = None
+        if scpm_metadata is not None and scpm_metadata.is_active:
+            try:
+                from app.cognitive.scpm.predictor import SCPMPredictor
+                scpm_predictor = SCPMPredictor()
+            except Exception as exc:
+                logger.warning("SCPM_PREDICTOR_INIT_ERROR: %s", exc)
+
         for activity in activities:
             context = await self._context.evaluate_context(
                 activity, lat=destination_lat, lon=destination_lon
             )
             b_match = self._score_budget_fit(activity, daily_budget_hint)
             i_match = self._score_interest_match(activity, preferences.interests)
-            p_score = self._score_personalization(activity, weights, daily_budget_hint)
 
-            # Composite weights distributed across factors that are real.
-            # distance_match and popularity_score have no real data source —
-            # weight is not allocated to them.
-            # personalization_score is now a real factor (behavioral memory).
+            # Personalization: SCPM when active, heuristic as fallback
+            p_source = "heuristic"
+            scpm_prob = None
+            if scpm_predictor is not None and scpm_metadata is not None:
+                try:
+                    result = scpm_predictor.predict(
+                        scpm_metadata,
+                        category=activity.get("category", "other"),
+                        estimated_cost=activity.get("estimated_cost", 0.0) or 0.0,
+                        daily_budget_hint=daily_budget_hint,
+                        weather_score=context.weather_score,
+                        opening_hrs_score=context.opening_hours_score,
+                        context_composite=context.composite,
+                        budget_sensitivity=weights.get("budget_sensitivity", 0.0),
+                        crowd_aversion=weights.get("crowd_aversion", 0.0),
+                        novelty_seeking=weights.get("novelty_seeking", 0.0),
+                        distance_tolerance=weights.get("distance_tolerance", 0.0),
+                        pace_preference=weights.get("pace_preference", 0.0),
+                    )
+                    if result.model_active:
+                        p_score = result.probability
+                        p_source = "SCPM"
+                        scpm_prob = result.probability
+                    else:
+                        p_score = self._score_personalization(activity, weights, daily_budget_hint)
+                except Exception as exc:
+                    logger.warning("SCPM_PREDICT_FAIL activity=%r error=%s",
+                                   activity.get("title"), exc)
+                    p_score = self._score_personalization(activity, weights, daily_budget_hint)
+            else:
+                p_score = self._score_personalization(activity, weights, daily_budget_hint)
+
             composite = round(
                 0.30 * b_match
                 + 0.30 * i_match
@@ -103,6 +145,8 @@ class RecommendationEngine:
                     context=context,
                     composite_score=composite,
                     personalization_score=p_score,
+                    personalization_source=p_source,
+                    scpm_probability=scpm_prob,
                     unavailable_factors=["distance_match", "popularity_score"] + context.unavailable_components,
                 )
             )

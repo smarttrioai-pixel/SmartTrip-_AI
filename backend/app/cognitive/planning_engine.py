@@ -105,7 +105,6 @@ from app.services.context_builder import ContextBuilder, ITINERARY_MAX_TOKENS
 from app.services.itinerary_validator import normalize_days, _time_key
 from app.services.llm_service import LLMService
 from app.services.place_enrichment_service import PlaceEnrichmentService
-
 logger = logging.getLogger(__name__)
 
 
@@ -196,6 +195,7 @@ class PlanningEngine:
         context_builder: ContextBuilder,
         live_context_engine: LiveContextEngine | None = None,
         place_consistency_validator: PlaceConsistencyValidator | None = None,
+        scpm_repository=None,  # SCPMRepository | None
     ) -> None:
         self._profiles = user_profile_engine
         self._memory = memory_engine
@@ -208,6 +208,7 @@ class PlanningEngine:
         self._llm = llm_service
         self._context_builder = context_builder
         self._live_context_engine = live_context_engine
+        self._scpm_repository = scpm_repository  # optional; None = SCPM disabled
         self._consistency_validator = (
             place_consistency_validator or get_place_consistency_validator()
         )
@@ -627,9 +628,9 @@ class PlanningEngine:
 
         # ----------------------------------------------------------------
         # Stage 9: SCIF Cognitive Scoring + Explainability
-        # Feature weights from behavioral memory (memory_behavioral/{uid})
-        # are now passed to score_and_rank() so they numerically affect
-        # the personalization_score component of composite_score.
+        # Load SCPM metadata (if repository available) so that score_and_rank
+        # can use the trained ML model for personalization_score.
+        # Falls back to heuristic transparently when SCPM is inactive.
         # ----------------------------------------------------------------
         t_score = time.monotonic()
         daily_budget_hint = request.budget / max(num_days, 1)
@@ -639,7 +640,17 @@ class PlanningEngine:
         if memory_context is not None:
             behavioral_weights = memory_context.feature_weights or {}
 
-        personalization_active = any(abs(v) > 0.05 for v in behavioral_weights.values())
+        # Load SCPM model metadata for this user
+        scpm_metadata = None
+        if self._scpm_repository is not None:
+            try:
+                scpm_metadata = await self._scpm_repository.get_model_metadata(user_id)
+            except Exception as exc:
+                logger.warning("SCPM_META_LOAD_FAIL user=%s error=%s", user_id, exc)
+
+        personalization_active = (
+            scpm_metadata is not None and scpm_metadata.is_active
+        ) or any(abs(v) > 0.05 for v in behavioral_weights.values())
 
         for day in days:
             scored_activities = await self._recommendations.score_and_rank(
@@ -649,6 +660,7 @@ class PlanningEngine:
                 destination_lat=destination_lat,
                 destination_lon=destination_lon,
                 feature_weights=behavioral_weights,
+                scpm_metadata=scpm_metadata,  # None when SCPM inactive
             )
             explained = []
             for scored in scored_activities:

@@ -81,6 +81,38 @@ class ActivityFeedbackRequest(BaseModel):
         description="Optional free-text comment",
     )
 
+    # ---------------------------------------------------------------
+    # SCPM training context fields (optional — sent by frontend when
+    # available from the activity's explanation object).
+    # These represent pre-feedback state — no data leakage risk.
+    # ---------------------------------------------------------------
+    estimated_cost: float | None = Field(
+        default=None,
+        description="Activity estimated cost (for budget_ratio feature)",
+    )
+    daily_budget_hint: float | None = Field(
+        default=None,
+        description="Daily budget for this trip (denominator for budget_ratio)",
+    )
+    weather_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="ContextEngine weather score at planning time",
+    )
+    opening_hrs_score: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="ContextEngine opening hours score at planning time",
+    )
+    context_composite: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="ContextEngine composite score at planning time",
+    )
+
 
 class ActivityFeedbackResponse(BaseModel):
     """Response after recording activity feedback."""
