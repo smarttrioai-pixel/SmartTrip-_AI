@@ -73,28 +73,8 @@ class Settings(BaseSettings):
     # LLM Provider selection
     # ------------------------------------------------------------------
     LLM_PROVIDER: str = Field(
-        default="openai",
-        description="Primary LLM provider: 'openai' | 'groq'",
-    )
-
-    # ------------------------------------------------------------------
-    # OpenAI
-    # ------------------------------------------------------------------
-    OPENAI_API_KEY: str | None = Field(
-        default=None,
-        description="OpenAI API key (required when LLM_PROVIDER=openai)",
-    )
-    OPENAI_ITINERARY_MODEL: str = Field(
-        default="gpt-4o",
-        description="OpenAI model for itinerary generation",
-    )
-    OPENAI_CHAT_MODEL: str = Field(
-        default="gpt-4o-mini",
-        description="OpenAI model for chat/tour guide",
-    )
-    OPENAI_DIARY_MODEL: str = Field(
-        default="gpt-4o-mini",
-        description="OpenAI model for diary generation",
+        default="gemini",
+        description="Primary LLM provider: 'gemini' (default)",
     )
 
     # ------------------------------------------------------------------
@@ -103,24 +83,6 @@ class Settings(BaseSettings):
     DIARY_PDF_ENABLED: bool = Field(
         default=True,
         description="Enable real PDF export via reportlab",
-    )
-
-    # ------------------------------------------------------------------
-    # Groq Inference API  — TEXT GENERATION
-    # All LLM text generation routes through Groq's OpenAI-compatible API.
-    # ------------------------------------------------------------------
-    GROQ_API_KEY: str | None = Field(
-        default=None,
-        description="Groq API key (required for all text generation tasks)",
-    )
-
-    GROQ_MODEL: str = Field(
-        default="qwen/qwen3.6-27b",
-        description=(
-            "Groq model for text generation. Default: qwen/qwen3.6-27b. "
-            "This is a reasoning model — GroqProvider passes reasoning_effort='none' "
-            "for generate_json() calls to suppress <think> output and output clean JSON."
-        ),
     )
 
     # ------------------------------------------------------------------
@@ -139,20 +101,50 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
-    # Gemini AI  — VISION ONLY
-    # Gemini is used exclusively for multimodal Vision tasks:
-    #   landmark recognition, image understanding, AR Explore, Vision Q&A.
-    # All text generation uses Groq (GROQ_API_KEY above).
+    # Gemini AI  — PRIMARY LLM + VISION
+    # ALL text generation (itinerary, chat, diary, Q&A) routes through Gemini.
+    # Vision stays in app/integrations/gemini_vision_service.py.
+    #
+    # MULTI-KEY ROTATION:
+    #   Set GEMINI_API_KEYS as a comma-separated list of API keys.
+    #   Example: GEMINI_API_KEYS=AIzaKey1,AIzaKey2,AIzaKey3
+    #   The provider rotates to the next key automatically on 429 / quota errors.
+    #   GEMINI_API_KEY (single key) is also supported as a fallback.
     # ------------------------------------------------------------------
     GEMINI_API_KEY: str | None = Field(
         default=None,
-        description="Google Gemini API Key (required for Vision endpoints only)",
+        description=(
+            "Single Google Gemini API Key. Used if GEMINI_API_KEYS is not set. "
+            "For multi-key rotation, use GEMINI_API_KEYS instead."
+        ),
+    )
+
+    GEMINI_API_KEYS: str | None = Field(
+        default=None,
+        description=(
+            "Comma-separated list of Google Gemini API Keys for automatic key rotation. "
+            "Example: AIzaKey1,AIzaKey2,AIzaKey3. "
+            "When a key hits its quota (429), the provider automatically tries the next key."
+        ),
     )
 
     GEMINI_MODEL: str = Field(
         default="gemini-2.5-flash",
-        description="Gemini model for Vision tasks only",
+        description="Gemini model for all text generation and vision tasks.",
     )
+
+    def get_gemini_api_keys(self) -> list[str]:
+        """
+        Return the list of Gemini API keys for multi-key rotation.
+        Prefers GEMINI_API_KEYS (comma-separated) over single GEMINI_API_KEY.
+        """
+        if self.GEMINI_API_KEYS:
+            keys = [k.strip() for k in self.GEMINI_API_KEYS.split(",") if k.strip()]
+            if keys:
+                return keys
+        if self.GEMINI_API_KEY:
+            return [self.GEMINI_API_KEY]
+        return []
 
     # ------------------------------------------------------------------
     # External integrations

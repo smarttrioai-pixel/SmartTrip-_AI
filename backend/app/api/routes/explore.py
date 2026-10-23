@@ -5,7 +5,7 @@ Wikipedia background enrichment, AR overlay annotations, and historical
 audio narration scripts.
 
 Gemini Vision is used for /analyze-landmark (image → landmark name).
-LLMService (via GroqProvider) is used for /qa (text Q&A answers).
+LLMService (via GeminiTextProvider) is used for /qa (text Q&A answers).
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ async def landmark_qa(
     llm_service: LLMService = Depends(get_llm_service),
 ) -> dict[str, str]:
     """
-    Answer a landmark question using LLMService (Groq → qwen/qwen3-32b).
+    Answer a landmark question using LLMService (Gemini → gemini-2.5-flash).
 
     Note: /analyze-landmark above uses Gemini Vision (image → landmark).
     This endpoint uses text generation only — no image is involved.

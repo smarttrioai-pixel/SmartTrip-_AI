@@ -19,7 +19,7 @@ Orchestrates trip itinerary generation through the full SCIF pipeline:
               → weather + budget + profile + memory + SCIF constraints
 
     Stage 3   LLM Service → Provider → Model
-              LLMService.generate_json() → Qwen 3.6 27B via Groq
+              LLMService.generate_json() → Gemini via GeminiTextProvider
               → raw itinerary JSON (planning INTENT only, no real places)
 
     Stage 4   Itinerary Normalization

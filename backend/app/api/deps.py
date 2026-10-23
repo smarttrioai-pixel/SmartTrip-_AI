@@ -25,8 +25,7 @@ from app.services.context_builder import ContextBuilder
 from app.services.embedding_service import EmbeddingService
 from app.services.llm_service import LLMService
 from app.services.providers.base import BaseLLMProvider
-from app.services.providers.openai_provider import OpenAIProvider
-from app.services.providers.groq_provider import GroqProvider
+from app.services.providers.gemini_provider import GeminiTextProvider
 from app.services.place_enrichment_service import PlaceEnrichmentService, get_place_enrichment_service
 from app.integrations.geoapify_provider import GeoapifyProvider, get_geoapify_provider
 from app.integrations.google_places_provider import GooglePlacesProvider, get_google_places_provider
@@ -45,30 +44,17 @@ _settings = get_settings()
 
 
 def get_llm_provider() -> BaseLLMProvider:
-    """Factory: returns OpenAIProvider or GroqProvider based on LLM_PROVIDER env var."""
-    provider = _settings.LLM_PROVIDER.lower()
-    if provider == "openai":
-        if not _settings.OPENAI_API_KEY:
-            raise RuntimeError(
-                "OPENAI_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=groq."
-            )
-        return OpenAIProvider(
-            api_key=_settings.OPENAI_API_KEY,
-            model=_settings.OPENAI_ITINERARY_MODEL,
-        )
-    elif provider == "groq":
-        if not _settings.GROQ_API_KEY:
-            raise RuntimeError(
-                "GROQ_API_KEY is not set. Set it in .env or switch LLM_PROVIDER=openai."
-            )
-        return GroqProvider(
-            api_key=_settings.GROQ_API_KEY,
-            model=_settings.GROQ_MODEL,
-        )
-    else:
+    """Factory: returns GeminiTextProvider with multi-key rotation."""
+    keys = _settings.get_gemini_api_keys()
+    if not keys:
         raise RuntimeError(
-            f"Unknown LLM_PROVIDER={_settings.LLM_PROVIDER!r}. Use 'openai' or 'groq'."
+            "No Gemini API key found. Set GEMINI_API_KEYS (comma-separated list) "
+            "or GEMINI_API_KEY in your .env file."
         )
+    return GeminiTextProvider(
+        api_keys=keys,
+        model=_settings.GEMINI_MODEL,
+    )
 
 
 def get_llm_service(

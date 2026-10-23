@@ -2,7 +2,7 @@
 Business logic for the AI Chat assistant.
 
 Connects chat interaction to MemoryEngine (retrieval), TripRepository (trip context),
-and LLMService (text generation via OpenAI by default).
+and LLMService (text generation via Gemini).
 
 Architecture:
     ChatService
@@ -12,7 +12,7 @@ Architecture:
          ↓
     ContextBuilder.build_chat_context()
          ↓
-    LLMService.chat()             ← Provider abstraction (OpenAI / Groq)
+    LLMService.chat()             ← Provider abstraction (Gemini)
 
 The LLM can signal structured actions (e.g., replace_activity) via [ACTION: ...] tags.
 These are extracted and returned to the caller for routing to ItineraryModifier.
@@ -117,7 +117,7 @@ class ChatService:
             )
 
         # ------------------------------------------------------------------
-        # LLMService → OpenAIProvider (or GroqProvider as fallback)
+        # LLMService → GeminiTextProvider (multi-key rotation)
         # ------------------------------------------------------------------
         reply_text = await self._llm.chat(
             system_prompt=SYSTEM_PROMPT,
