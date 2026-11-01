@@ -102,7 +102,7 @@ from app.cognitive.user_profile_engine import UserProfileEngine
 from app.integrations.navigation_service import NavigationService
 from app.schemas.trip import GenerateItineraryRequest
 from app.services.context_builder import ContextBuilder, ITINERARY_MAX_TOKENS
-from app.services.itinerary_validator import normalize_days, _time_key
+from app.services.itinerary_validator import normalize_days, sort_activities_in_days, _time_key
 from app.services.llm_service import LLMService
 from app.services.place_enrichment_service import PlaceEnrichmentService
 logger = logging.getLogger(__name__)
@@ -505,6 +505,10 @@ class PlanningEngine:
                 "(enrichment left required fields empty)",
                 request.destination, missing_fields_count,
             )
+
+        # Re-sort activities after enrichment: enrichment can inject/reorder
+        # activities, so we guarantee ascending chronological order here.
+        sort_activities_in_days(days)
 
         # ----------------------------------------------------------------
         # Stage 7: Opening-Hours Validation (SCIF Pass 2 — post-enrichment)

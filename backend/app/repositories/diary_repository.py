@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from google.cloud.firestore import AsyncClient, Query
+from google.cloud.firestore_v1.base_query import FieldFilter
 from fastapi import HTTPException
 
 class DiaryRepository:
@@ -22,7 +23,7 @@ class DiaryRepository:
         
         query = (
             self._db.collection("trips").document(trip_id).collection("diary_entries")
-            .where("user_id", "==", user_id)
+            .where(filter=FieldFilter("user_id", "==", user_id))
             .order_by("date", direction=Query.ASCENDING)
         )
         
@@ -58,7 +59,7 @@ class DiaryRepository:
         collection = self._db.collection("trips").document(trip_id).collection("diary_entries")
         
         # Check if entry for date already exists
-        query = collection.where("user_id", "==", user_id).where("date", "==", date).limit(1)
+        query = collection.where(filter=FieldFilter("user_id", "==", user_id)).where(filter=FieldFilter("date", "==", date)).limit(1)
         existing = [doc async for doc in query.stream()]
         
         now = datetime.now(timezone.utc)

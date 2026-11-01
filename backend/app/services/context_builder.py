@@ -25,7 +25,7 @@ from app.cognitive.memory_engine import MemoryContext
 from app.schemas.trip import GenerateItineraryRequest
 from app.models.user import UserPreferences
 
-ITINERARY_MAX_TOKENS = 4500
+ITINERARY_MAX_TOKENS = 8192   # Increased from 4500 — prevents JSON truncation in multi-day itineraries
 
 
 class ContextBuilder:

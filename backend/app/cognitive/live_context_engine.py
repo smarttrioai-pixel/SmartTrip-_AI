@@ -239,8 +239,13 @@ class LiveContextEngine:
     ) -> LiveContext:
         """
         Fetch real-world data for all travel dates.
-        Called BEFORE Qwen generates the itinerary so weather constraints
+        Called BEFORE Gemini generates the itinerary so weather constraints
         can be injected into the prompt.
+
+        Uses WeatherService.get_forecast_range() to fetch ALL travel dates
+        in a SINGLE HTTP request — avoids per-day loops that caused HTTP 429.
+        Weather failure is non-fatal: returns an unavailable LiveContext so
+        trip generation continues without weather data.
         """
         live = LiveContext(
             travel_start_date=start_date,
@@ -249,13 +254,26 @@ class LiveContextEngine:
             unavailable_sources=["traffic", "events"],
         )
 
-        # Fetch weather for each travel date
-        current_date = start_date
+        try:
+            # Batch fetch all travel dates in ONE HTTP request
+            weather_by_date = await self._weather.get_forecast_range(
+                lat, lon, start_date, end_date
+            )
+        except Exception as exc:
+            # Should not happen (get_forecast_range handles errors internally),
+            # but guard defensively so trip generation is never blocked.
+            logger.warning(
+                "SCIF_CONTEXT build_live_context weather fetch failed for %r: %s "
+                "— continuing without weather data",
+                destination, exc,
+            )
+            live.unavailable_sources.append("weather")
+            return live
+
         weather_available = False
-        while current_date <= end_date:
-            snapshot_raw = await self._weather.get_forecast_for_date(lat, lon, current_date)
+        for travel_date, snapshot_raw in weather_by_date.items():
             snap = WeatherSnapshot(
-                date=current_date,
+                date=travel_date,
                 status=snapshot_raw.get("status", "unavailable"),
                 condition=snapshot_raw.get("condition"),
                 temperature_max=snapshot_raw.get("temperature_max"),
@@ -268,10 +286,9 @@ class LiveContextEngine:
                 source=snapshot_raw.get("source", "unavailable"),
                 reason=snapshot_raw.get("reason"),
             )
-            live.weather_by_date[current_date] = snap
+            live.weather_by_date[travel_date] = snap
             if snap.status == "available":
                 weather_available = True
-            current_date += timedelta(days=1)
 
         if weather_available:
             live.available_sources.append("weather")

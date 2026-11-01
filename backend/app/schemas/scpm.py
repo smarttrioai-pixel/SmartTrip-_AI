@@ -3,7 +3,7 @@ Pydantic schemas for SCPM API endpoints.
 """
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TrainRequest(BaseModel):
@@ -21,6 +21,9 @@ class TrainRequest(BaseModel):
 
 class ModelStatusResponse(BaseModel):
     """GET /personalization/model-status"""
+    # model_version starts with 'model_' — suppress Pydantic protected namespace warning.
+    model_config = ConfigDict(protected_namespaces=())
+
     active: bool
     status: str
     model_version: str
@@ -47,6 +50,10 @@ class FeatureImportanceItem(BaseModel):
 
 class ExplanationResponse(BaseModel):
     """GET /personalization/explanation"""
+    # model_active and model_version start with 'model_' which conflicts with
+    # Pydantic's protected namespace. Suppress the warning explicitly.
+    model_config = ConfigDict(protected_namespaces=())
+
     model_active: bool
     model_version: str
     top_positive_factors: list[FeatureImportanceItem]

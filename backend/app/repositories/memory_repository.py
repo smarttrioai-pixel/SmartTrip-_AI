@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from google.cloud.firestore import AsyncClient, Query
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app.models.memory import (
     BEHAVIORAL_COLLECTION,
@@ -73,7 +74,7 @@ class MemoryRepository:
 
     async def list_feedback_for_user(self, user_id: str, *, limit: int = 20) -> list[FeedbackMemory]:
         query = (
-            self._feedback.where("user_id", "==", user_id)
+            self._feedback.where(filter=FieldFilter("user_id", "==", user_id))
             .order_by("created_at", direction=Query.DESCENDING)
             .limit(limit)
         )

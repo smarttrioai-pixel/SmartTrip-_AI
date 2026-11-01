@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 from google.cloud.firestore import AsyncClient, Query, Increment
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app.models.chat import COLLECTION, MESSAGES_SUBCOLLECTION, ChatMessage
 
@@ -126,7 +127,7 @@ class ChatRepository:
 
         query = (
             self._chats
-            .where("user_id", "==", user_id)
+            .where(filter=FieldFilter("user_id", "==", user_id))
             .order_by("updated_at", direction=Query.DESCENDING)
         )
 

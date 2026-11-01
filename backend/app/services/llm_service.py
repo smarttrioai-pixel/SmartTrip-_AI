@@ -55,14 +55,19 @@ _RETRYABLE_PHRASES = (
     "rate limit",
     "429",
     "503",
+    "502",
+    "500",
+    "504",
     "service unavailable",
     "overloaded",
+    "high demand",
     "timeout",
     "connection",
+    "resource_exhausted",
 )
 
-_MAX_API_RETRIES = 1          # max 1 retry for transient API failures
-_DEFAULT_RETRY_BACKOFF = 2.0  # seconds when no Retry-After header
+_MAX_API_RETRIES = 3          # max 3 retries for transient API failures
+_DEFAULT_RETRY_BACKOFF = 2.0  # seconds for first retry; doubles each attempt
 _MAX_RETRY_AFTER = 30.0       # cap on Retry-After honour to avoid hanging
 
 
@@ -225,11 +230,37 @@ class LLMService:
             cleaned,
         )
 
-        # Single json.loads() — NO retry on parse failure.
+        # JSON parse attempt with truncation detection.
+        # If the response appears truncated (unterminated string at a high column)
+        # we treat it as a transient failure and retry the full LLM call.
         try:
             result = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             elapsed = time.monotonic() - start
+            # Detect truncation: error near end of a long string → likely cut off
+            is_truncation = (
+                "unterminated string" in str(exc).lower()
+                or "expecting value" in str(exc).lower()
+            ) and len(cleaned) > 500
+
+            if is_truncation:
+                _circuit_breaker.record_failure()
+                logger.warning(
+                    "generate_json truncated response detected (will retry) | "
+                    "provider=%s model=%s latency=%.3fs error=%s len=%d",
+                    self._provider.provider_name,
+                    self._provider.model_name,
+                    elapsed,
+                    exc,
+                    len(cleaned),
+                )
+                raise RuntimeError(
+                    f"LLM returned truncated JSON (likely token limit). "
+                    f"Provider={self._provider.provider_name} "
+                    f"model={self._provider.model_name}. "
+                    f"Hint: increase max_tokens. Parse error: {exc}"
+                ) from exc
+
             _circuit_breaker.record_failure()
             logger.error(
                 "generate_json parse failure (NO retry) | provider=%s model=%s "
@@ -391,10 +422,8 @@ class LLMService:
                 if not is_retryable or attempt >= _MAX_API_RETRIES + 1:
                     break
 
-                # Determine wait time.
-                # On 429, the error message from GroqProvider contains
-                # "retry_after=Xs" — extract that value.
-                backoff = _DEFAULT_RETRY_BACKOFF
+                # Exponential backoff: 2s, 4s, 8s … capped at 30s
+                backoff = min(_DEFAULT_RETRY_BACKOFF * (2 ** (attempt - 1)), _MAX_RETRY_AFTER)
                 if "429" in str(exc) or "rate limit" in error_text:
                     extracted = _extract_retry_after(str(exc))
                     if extracted is not None:

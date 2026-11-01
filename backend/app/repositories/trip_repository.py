@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 
 from google.cloud.firestore import AsyncClient, AsyncCollectionReference, Query
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app.models.trip import COLLECTION, Trip
 
@@ -23,9 +24,9 @@ class TripRepository:
         return Trip.from_snapshot(snapshot.id, snapshot.to_dict())
 
     async def list_for_user(self, user_id: str, *, saved_only: bool = False) -> list[Trip]:
-        query = self._collection.where("user_id", "==", user_id)
+        query = self._collection.where(filter=FieldFilter("user_id", "==", user_id))
         if saved_only:
-            query = query.where("is_saved", "==", True)
+            query = query.where(filter=FieldFilter("is_saved", "==", True))
         query = query.order_by("created_at", direction=Query.DESCENDING)
 
         trips: list[Trip] = []
